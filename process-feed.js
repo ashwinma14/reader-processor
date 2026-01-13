@@ -51,7 +51,7 @@ const stats = {
   total: 0,
   promoted: [],
   skippedNoRead: [],
-  skippedNoHighlights: [],
+  skippedNoSummary: [],
   skippedCached: 0
 };
 
@@ -122,33 +122,6 @@ async function fetchAllFeedDocuments() {
   return documents;
 }
 
-async function fetchHighlightsForDocument(documentId) {
-  const highlights = [];
-  let cursor = null;
-
-  do {
-    const endpoint = cursor
-      ? `/list/?category=highlight&pageCursor=${cursor}`
-      : '/list/?category=highlight';
-
-    const data = await apiRequest(endpoint);
-
-    // Filter highlights that belong to this document
-    const docHighlights = (data.results || []).filter(h => h.parent_id === documentId);
-    highlights.push(...docHighlights);
-
-    cursor = data.nextPageCursor;
-
-    // If we found highlights for this doc, we might be done
-    // But we need to check all pages to be thorough
-    if (cursor) {
-      await delay(DELAY_MS);
-    }
-  } while (cursor);
-
-  return highlights;
-}
-
 async function moveToLibrary(documentId) {
   if (dryRun) {
     log(`  [DRY RUN] Would move document ${documentId} to Inbox`);
@@ -163,11 +136,17 @@ async function moveToLibrary(documentId) {
   log(`  Moved document ${documentId} to Inbox`);
 }
 
-function hasReadMarker(highlights) {
-  return highlights.some(h => {
-    const content = h.content || h.text || '';
-    return content.includes(READ_MARKER);
-  });
+function hasReadMarker(doc) {
+  // Check summary field (where Ghostreader puts its verdict)
+  const summary = doc.summary || '';
+  const notes = doc.notes || '';
+  return summary.includes(READ_MARKER) || notes.includes(READ_MARKER);
+}
+
+function hasSummary(doc) {
+  // Check if Ghostreader has processed this document
+  const summary = doc.summary || '';
+  return summary.length > 0;
 }
 
 async function processDocuments(documents) {
@@ -175,9 +154,8 @@ async function processDocuments(documents) {
     const title = doc.title || doc.url || `ID: ${doc.id}`;
     const docId = doc.id;
 
-    // Skip if already processed (and had highlights)
-    const cached = cache.processed[docId];
-    if (cached && cached.hadHighlights) {
+    // Skip if already processed
+    if (cache.processed[docId]) {
       log(`\nSkipping (cached): ${title}`);
       stats.skippedCached++;
       continue;
@@ -185,26 +163,23 @@ async function processDocuments(documents) {
 
     log(`\nProcessing: ${title}`);
 
-    await delay(DELAY_MS);
-    const highlights = await fetchHighlightsForDocument(docId);
-
-    if (highlights.length === 0) {
-      log(`  No highlights yet (Ghostreader hasn't processed)`);
-      stats.skippedNoHighlights.push(title);
+    if (!hasSummary(doc)) {
+      log(`  No summary yet (Ghostreader hasn't processed)`);
+      stats.skippedNoSummary.push(title);
       // Don't cache - we want to recheck when Ghostreader runs
       continue;
     }
 
-    if (hasReadMarker(highlights)) {
+    if (hasReadMarker(doc)) {
       log(`  Found "${READ_MARKER}" marker - promoting to Library`);
       await delay(DELAY_MS);
       await moveToLibrary(docId);
       stats.promoted.push(title);
-      cache.processed[docId] = { hadHighlights: true, promoted: true };
+      cache.processed[docId] = { promoted: true };
     } else {
-      log(`  Has ${highlights.length} highlight(s) but no READ marker`);
+      log(`  Has summary but no READ marker`);
       stats.skippedNoRead.push(title);
-      cache.processed[docId] = { hadHighlights: true, promoted: false };
+      cache.processed[docId] = { promoted: false };
     }
   }
 
@@ -229,16 +204,16 @@ function printSummary() {
     console.log('  (none)');
   }
 
-  console.log(`\nSkipped - processed, no READ marker (${stats.skippedNoRead.length}):`);
+  console.log(`\nSkipped - has summary, no READ marker (${stats.skippedNoRead.length}):`);
   if (stats.skippedNoRead.length > 0) {
     stats.skippedNoRead.forEach(t => console.log(`  - ${t}`));
   } else {
     console.log('  (none)');
   }
 
-  console.log(`\nSkipped - not yet processed by Ghostreader (${stats.skippedNoHighlights.length}):`);
-  if (stats.skippedNoHighlights.length > 0) {
-    stats.skippedNoHighlights.forEach(t => console.log(`  - ${t}`));
+  console.log(`\nSkipped - no summary yet (${stats.skippedNoSummary.length}):`);
+  if (stats.skippedNoSummary.length > 0) {
+    stats.skippedNoSummary.forEach(t => console.log(`  - ${t}`));
   } else {
     console.log('  (none)');
   }
