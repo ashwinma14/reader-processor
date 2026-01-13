@@ -124,16 +124,16 @@ async function fetchAllFeedDocuments() {
 
 async function moveToLibrary(documentId) {
   if (dryRun) {
-    log(`  [DRY RUN] Would move document ${documentId} to Inbox`);
+    log(`  [DRY RUN] Would move document ${documentId} to Later`);
     return;
   }
 
   await apiRequest(`/update/${documentId}/`, {
     method: 'PATCH',
-    body: JSON.stringify({ location: 'new' })
+    body: JSON.stringify({ location: 'later' })
   });
 
-  log(`  Moved document ${documentId} to Inbox`);
+  log(`  Moved document ${documentId} to Later`);
 }
 
 function hasReadMarker(doc) {
