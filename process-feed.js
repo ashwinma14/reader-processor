@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CACHE_FILE = join(__dirname, '.cache.json');
+
 const API_BASE = 'https://readwise.io/api/v3';
 const DELAY_MS = 3000; // 20 req/min = 1 per 3 seconds
 const READ_MARKER = '📖 READ';
@@ -8,8 +15,28 @@ const READ_MARKER = '📖 READ';
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
+const noCache = args.includes('--no-cache');
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
+
+// Cache functions
+function loadCache() {
+  if (noCache || !existsSync(CACHE_FILE)) {
+    return { processed: {} };
+  }
+  try {
+    return JSON.parse(readFileSync(CACHE_FILE, 'utf8'));
+  } catch {
+    return { processed: {} };
+  }
+}
+
+function saveCache(cache) {
+  if (dryRun || noCache) return;
+  writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+}
+
+const cache = loadCache();
 
 // Get token from environment
 const token = process.env.READWISE_TOKEN;
@@ -24,7 +51,8 @@ const stats = {
   total: 0,
   promoted: [],
   skippedNoRead: [],
-  skippedNoHighlights: []
+  skippedNoHighlights: [],
+  skippedCached: 0
 };
 
 function log(message) {
@@ -145,27 +173,42 @@ function hasReadMarker(highlights) {
 async function processDocuments(documents) {
   for (const doc of documents) {
     const title = doc.title || doc.url || `ID: ${doc.id}`;
+    const docId = doc.id;
+
+    // Skip if already processed (and had highlights)
+    const cached = cache.processed[docId];
+    if (cached && cached.hadHighlights) {
+      log(`\nSkipping (cached): ${title}`);
+      stats.skippedCached++;
+      continue;
+    }
+
     log(`\nProcessing: ${title}`);
 
     await delay(DELAY_MS);
-    const highlights = await fetchHighlightsForDocument(doc.id);
+    const highlights = await fetchHighlightsForDocument(docId);
 
     if (highlights.length === 0) {
       log(`  No highlights yet (Ghostreader hasn't processed)`);
       stats.skippedNoHighlights.push(title);
+      // Don't cache - we want to recheck when Ghostreader runs
       continue;
     }
 
     if (hasReadMarker(highlights)) {
       log(`  Found "${READ_MARKER}" marker - promoting to Library`);
       await delay(DELAY_MS);
-      await moveToLibrary(doc.id);
+      await moveToLibrary(docId);
       stats.promoted.push(title);
+      cache.processed[docId] = { hadHighlights: true, promoted: true };
     } else {
       log(`  Has ${highlights.length} highlight(s) but no READ marker`);
       stats.skippedNoRead.push(title);
+      cache.processed[docId] = { hadHighlights: true, promoted: false };
     }
   }
+
+  saveCache(cache);
 }
 
 function printSummary() {
@@ -198,6 +241,10 @@ function printSummary() {
     stats.skippedNoHighlights.forEach(t => console.log(`  - ${t}`));
   } else {
     console.log('  (none)');
+  }
+
+  if (stats.skippedCached > 0) {
+    console.log(`\nSkipped - already processed (cached): ${stats.skippedCached}`);
   }
 
   console.log('\n' + '='.repeat(60));

@@ -55,6 +55,7 @@ The workflow will now run automatically every hour.
 | `--dry-run` | Show what would happen without making changes |
 | `--verbose` | Show each document being processed |
 | `--limit=N` | Only process the first N documents (for testing) |
+| `--no-cache` | Ignore cache and reprocess all documents |
 
 ## Output Example
 
