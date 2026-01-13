@@ -1,0 +1,21 @@
+{
+  "name": "reader-feed-processor",
+  "version": "1.0.0",
+  "description": "Processes Readwise Reader Feed and promotes articles to Library based on Ghostreader verdicts",
+  "type": "module",
+  "main": "process-feed.js",
+  "scripts": {
+    "start": "node process-feed.js",
+    "dry-run": "node process-feed.js --dry-run --verbose"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "readwise",
+    "reader",
+    "ghostreader",
+    "automation"
+  ],
+  "license": "MIT"
+}
