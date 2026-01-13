@@ -91,7 +91,7 @@ async function apiRequest(endpoint, options = {}) {
   return response.json();
 }
 
-async function fetchAllFeedDocuments() {
+async function fetchFeedDocuments(maxDocs = null) {
   const documents = [];
   let cursor = null;
 
@@ -113,6 +113,12 @@ async function fetchAllFeedDocuments() {
     cursor = data.nextPageCursor;
 
     log(`  Fetched ${docs.length} documents (total: ${documents.length})`);
+
+    // Stop early if we have enough documents
+    if (maxDocs && documents.length >= maxDocs) {
+      log(`  Stopping fetch (have ${documents.length}, need ${maxDocs})`);
+      break;
+    }
 
     if (cursor) {
       await delay(DELAY_MS);
@@ -233,14 +239,14 @@ async function main() {
   console.log('');
 
   try {
-    let documents = await fetchAllFeedDocuments();
+    let documents = await fetchFeedDocuments(limit);
     stats.total = documents.length;
 
-    console.log(`Found ${documents.length} document(s) in Feed`);
-
-    if (limit && documents.length > limit) {
-      console.log(`Processing only first ${limit} (use --limit=N to change)`);
+    if (limit) {
+      console.log(`Fetched ${documents.length} document(s) from Feed (limited to ${limit})`);
       documents = documents.slice(0, limit);
+    } else {
+      console.log(`Found ${documents.length} document(s) in Feed`);
     }
     console.log('');
 
