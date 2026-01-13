@@ -8,6 +8,8 @@ const READ_MARKER = '📖 READ';
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
+const limitArg = args.find(a => a.startsWith('--limit='));
+const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
 
 // Get token from environment
 const token = process.env.READWISE_TOKEN;
@@ -204,13 +206,21 @@ function printSummary() {
 async function main() {
   console.log('Reader Feed Processor');
   console.log(`Mode: ${dryRun ? 'DRY RUN' : 'LIVE'}`);
-  console.log(`Verbose: ${verbose ? 'ON' : 'OFF'}\n`);
+  console.log(`Verbose: ${verbose ? 'ON' : 'OFF'}`);
+  if (limit) console.log(`Limit: ${limit} document(s)`);
+  console.log('');
 
   try {
-    const documents = await fetchAllFeedDocuments();
+    let documents = await fetchAllFeedDocuments();
     stats.total = documents.length;
 
-    console.log(`Found ${documents.length} document(s) in Feed\n`);
+    console.log(`Found ${documents.length} document(s) in Feed`);
+
+    if (limit && documents.length > limit) {
+      console.log(`Processing only first ${limit} (use --limit=N to change)`);
+      documents = documents.slice(0, limit);
+    }
+    console.log('');
 
     if (documents.length === 0) {
       console.log('No documents to process.');
