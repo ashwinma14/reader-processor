@@ -16,8 +16,11 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
 const noCache = args.includes('--no-cache');
+const archiveLater = args.includes('--archive-later');
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
+const sinceArg = args.find(a => a.startsWith('--since='));
+const sinceDays = sinceArg ? parseInt(sinceArg.split('=')[1], 10) : null;
 
 // Cache functions
 function loadCache() {
@@ -47,12 +50,14 @@ if (!token) {
 }
 
 // Stats tracking
-const stats = {
+let stats = {
   total: 0,
   promoted: [],
   skippedNoRead: [],
   skippedNoSummary: [],
-  skippedCached: 0
+  skippedCached: 0,
+  skippedTooOld: 0,
+  archived: 0
 };
 
 function log(message) {
@@ -91,16 +96,16 @@ async function apiRequest(endpoint, options = {}) {
   return response.json();
 }
 
-async function fetchFeedDocuments(maxDocs = null) {
+async function fetchDocuments(location, maxDocs = null) {
   const documents = [];
   let cursor = null;
 
-  log('Fetching documents from Feed...');
+  log(`Fetching documents from ${location}...`);
 
   do {
     const endpoint = cursor
-      ? `/list/?location=feed&pageCursor=${cursor}`
-      : '/list/?location=feed';
+      ? `/list/?location=${location}&pageCursor=${cursor}`
+      : `/list/?location=${location}`;
 
     const data = await apiRequest(endpoint);
 
@@ -128,37 +133,100 @@ async function fetchFeedDocuments(maxDocs = null) {
   return documents;
 }
 
-async function moveToLibrary(documentId) {
-  if (dryRun) {
-    log(`  [DRY RUN] Would move document ${documentId} to Later`);
-    return;
-  }
-
+async function updateDocumentLocation(documentId, location) {
   await apiRequest(`/update/${documentId}/`, {
     method: 'PATCH',
-    body: JSON.stringify({ location: 'later' })
+    body: JSON.stringify({ location })
   });
-
-  log(`  Moved document ${documentId} to Later`);
 }
 
 function hasReadMarker(doc) {
-  // Check summary field (where Ghostreader puts its verdict)
   const summary = doc.summary || '';
   const notes = doc.notes || '';
   return summary.includes(READ_MARKER) || notes.includes(READ_MARKER);
 }
 
 function hasSummary(doc) {
-  // Check if Ghostreader has processed this document
   const summary = doc.summary || '';
   return summary.length > 0;
 }
 
-async function processDocuments(documents) {
+function isWithinDays(doc, days) {
+  if (!days) return true;
+  const docDate = new Date(doc.created_at || doc.updated_at);
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  return docDate >= cutoff;
+}
+
+// Archive all items in Later
+async function archiveAllLater() {
+  console.log('='.repeat(60));
+  console.log('ARCHIVING ALL LATER ITEMS');
+  console.log('='.repeat(60));
+  console.log('');
+
+  const documents = await fetchDocuments('later');
+  console.log(`\nFound ${documents.length} document(s) in Later\n`);
+
+  if (documents.length === 0) {
+    console.log('Nothing to archive.');
+    return;
+  }
+
+  let archived = 0;
+  for (const doc of documents) {
+    const title = doc.title || doc.url || `ID: ${doc.id}`;
+    log(`Archiving: ${title}`);
+
+    if (dryRun) {
+      log(`  [DRY RUN] Would archive`);
+    } else {
+      await delay(DELAY_MS);
+      await updateDocumentLocation(doc.id, 'archive');
+    }
+    archived++;
+  }
+
+  console.log('\n' + '='.repeat(60));
+  console.log(`${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${archived} document(s)`);
+  console.log('='.repeat(60));
+}
+
+// Process Feed documents
+async function processFeed() {
+  console.log('='.repeat(60));
+  console.log('PROCESSING FEED');
+  console.log('='.repeat(60));
+  if (sinceDays) console.log(`Filtering to last ${sinceDays} days`);
+  console.log('');
+
+  let documents = await fetchDocuments('feed', limit);
+  stats.total = documents.length;
+
+  if (limit) {
+    console.log(`\nFetched ${documents.length} document(s) from Feed (limited to ${limit})`);
+    documents = documents.slice(0, limit);
+  } else {
+    console.log(`\nFound ${documents.length} document(s) in Feed`);
+  }
+  console.log('');
+
+  if (documents.length === 0) {
+    console.log('No documents to process.');
+    return;
+  }
+
   for (const doc of documents) {
     const title = doc.title || doc.url || `ID: ${doc.id}`;
     const docId = doc.id;
+
+    // Skip if too old
+    if (sinceDays && !isWithinDays(doc, sinceDays)) {
+      log(`\nSkipping (too old): ${title}`);
+      stats.skippedTooOld++;
+      continue;
+    }
 
     // Skip if already processed
     if (cache.processed[docId]) {
@@ -172,14 +240,17 @@ async function processDocuments(documents) {
     if (!hasSummary(doc)) {
       log(`  No summary yet (Ghostreader hasn't processed)`);
       stats.skippedNoSummary.push(title);
-      // Don't cache - we want to recheck when Ghostreader runs
       continue;
     }
 
     if (hasReadMarker(doc)) {
-      log(`  Found "${READ_MARKER}" marker - promoting to Library`);
-      await delay(DELAY_MS);
-      await moveToLibrary(docId);
+      log(`  Found "${READ_MARKER}" marker - promoting to Later`);
+      if (dryRun) {
+        log(`  [DRY RUN] Would move to Later`);
+      } else {
+        await delay(DELAY_MS);
+        await updateDocumentLocation(docId, 'later');
+      }
       stats.promoted.push(title);
       cache.processed[docId] = { promoted: true };
     } else {
@@ -190,6 +261,7 @@ async function processDocuments(documents) {
   }
 
   saveCache(cache);
+  printSummary();
 }
 
 function printSummary() {
@@ -201,9 +273,9 @@ function printSummary() {
     console.log('(DRY RUN - no changes made)\n');
   }
 
-  console.log(`Total documents in Feed: ${stats.total}`);
+  console.log(`Total documents checked: ${stats.total}`);
 
-  console.log(`\nPromoted to Library (${stats.promoted.length}):`);
+  console.log(`\nPromoted to Later (${stats.promoted.length}):`);
   if (stats.promoted.length > 0) {
     stats.promoted.forEach(t => console.log(`  - ${t}`));
   } else {
@@ -224,6 +296,10 @@ function printSummary() {
     console.log('  (none)');
   }
 
+  if (stats.skippedTooOld > 0) {
+    console.log(`\nSkipped - older than ${sinceDays} days: ${stats.skippedTooOld}`);
+  }
+
   if (stats.skippedCached > 0) {
     console.log(`\nSkipped - already processed (cached): ${stats.skippedCached}`);
   }
@@ -236,27 +312,16 @@ async function main() {
   console.log(`Mode: ${dryRun ? 'DRY RUN' : 'LIVE'}`);
   console.log(`Verbose: ${verbose ? 'ON' : 'OFF'}`);
   if (limit) console.log(`Limit: ${limit} document(s)`);
+  if (sinceDays) console.log(`Since: ${sinceDays} days`);
   console.log('');
 
   try {
-    let documents = await fetchFeedDocuments(limit);
-    stats.total = documents.length;
-
-    if (limit) {
-      console.log(`Fetched ${documents.length} document(s) from Feed (limited to ${limit})`);
-      documents = documents.slice(0, limit);
-    } else {
-      console.log(`Found ${documents.length} document(s) in Feed`);
-    }
-    console.log('');
-
-    if (documents.length === 0) {
-      console.log('No documents to process.');
-      return;
+    if (archiveLater) {
+      await archiveAllLater();
+      console.log('');
     }
 
-    await processDocuments(documents);
-    printSummary();
+    await processFeed();
 
   } catch (error) {
     console.error('Error:', error.message);
