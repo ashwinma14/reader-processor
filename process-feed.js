@@ -17,6 +17,7 @@ const dryRun = args.includes('--dry-run');
 const verbose = args.includes('--verbose');
 const noCache = args.includes('--no-cache');
 const archiveLater = args.includes('--archive-later');
+const archiveSkipped = args.includes('--archive-skipped');
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
 const sinceArg = args.find(a => a.startsWith('--since='));
@@ -53,11 +54,12 @@ if (!token) {
 let stats = {
   total: 0,
   promoted: [],
+  archivedNoRead: [],
+  archivedNoSummary: [],
   skippedNoRead: [],
   skippedNoSummary: [],
   skippedCached: 0,
-  skippedTooOld: 0,
-  archived: 0
+  skippedTooOld: 0
 };
 
 function log(message) {
@@ -238,8 +240,20 @@ async function processFeed() {
     log(`\nProcessing: ${title}`);
 
     if (!hasSummary(doc)) {
-      log(`  No summary yet (Ghostreader hasn't processed)`);
-      stats.skippedNoSummary.push(title);
+      if (archiveSkipped) {
+        log(`  No summary - archiving`);
+        if (dryRun) {
+          log(`  [DRY RUN] Would archive`);
+        } else {
+          await delay(DELAY_MS);
+          await updateDocumentLocation(docId, 'archive');
+        }
+        stats.archivedNoSummary.push(title);
+        cache.processed[docId] = { archived: true };
+      } else {
+        log(`  No summary yet (Ghostreader hasn't processed)`);
+        stats.skippedNoSummary.push(title);
+      }
       continue;
     }
 
@@ -254,9 +268,21 @@ async function processFeed() {
       stats.promoted.push(title);
       cache.processed[docId] = { promoted: true };
     } else {
-      log(`  Has summary but no READ marker`);
-      stats.skippedNoRead.push(title);
-      cache.processed[docId] = { promoted: false };
+      if (archiveSkipped) {
+        log(`  No READ marker - archiving`);
+        if (dryRun) {
+          log(`  [DRY RUN] Would archive`);
+        } else {
+          await delay(DELAY_MS);
+          await updateDocumentLocation(docId, 'archive');
+        }
+        stats.archivedNoRead.push(title);
+        cache.processed[docId] = { archived: true };
+      } else {
+        log(`  Has summary but no READ marker`);
+        stats.skippedNoRead.push(title);
+        cache.processed[docId] = { promoted: false };
+      }
     }
   }
 
@@ -282,18 +308,30 @@ function printSummary() {
     console.log('  (none)');
   }
 
-  console.log(`\nSkipped - has summary, no READ marker (${stats.skippedNoRead.length}):`);
-  if (stats.skippedNoRead.length > 0) {
-    stats.skippedNoRead.forEach(t => console.log(`  - ${t}`));
-  } else {
-    console.log('  (none)');
+  if (stats.archivedNoRead.length > 0) {
+    console.log(`\nArchived - no READ marker (${stats.archivedNoRead.length}):`);
+    stats.archivedNoRead.slice(0, 10).forEach(t => console.log(`  - ${t}`));
+    if (stats.archivedNoRead.length > 10) {
+      console.log(`  ... and ${stats.archivedNoRead.length - 10} more`);
+    }
   }
 
-  console.log(`\nSkipped - no summary yet (${stats.skippedNoSummary.length}):`);
+  if (stats.archivedNoSummary.length > 0) {
+    console.log(`\nArchived - no summary (${stats.archivedNoSummary.length}):`);
+    stats.archivedNoSummary.slice(0, 10).forEach(t => console.log(`  - ${t}`));
+    if (stats.archivedNoSummary.length > 10) {
+      console.log(`  ... and ${stats.archivedNoSummary.length - 10} more`);
+    }
+  }
+
+  if (stats.skippedNoRead.length > 0) {
+    console.log(`\nSkipped - has summary, no READ marker (${stats.skippedNoRead.length}):`);
+    stats.skippedNoRead.forEach(t => console.log(`  - ${t}`));
+  }
+
   if (stats.skippedNoSummary.length > 0) {
+    console.log(`\nSkipped - no summary yet (${stats.skippedNoSummary.length}):`);
     stats.skippedNoSummary.forEach(t => console.log(`  - ${t}`));
-  } else {
-    console.log('  (none)');
   }
 
   if (stats.skippedTooOld > 0) {
@@ -311,6 +349,7 @@ async function main() {
   console.log('Reader Feed Processor');
   console.log(`Mode: ${dryRun ? 'DRY RUN' : 'LIVE'}`);
   console.log(`Verbose: ${verbose ? 'ON' : 'OFF'}`);
+  if (archiveSkipped) console.log('Archive skipped: ON');
   if (limit) console.log(`Limit: ${limit} document(s)`);
   if (sinceDays) console.log(`Since: ${sinceDays} days`);
   console.log('');
