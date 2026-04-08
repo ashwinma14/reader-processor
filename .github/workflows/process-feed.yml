@@ -2,7 +2,7 @@ name: Process Reader Feed
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # Every 6 hours
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       verbose:
@@ -41,7 +41,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache.json
-          key: reader-cache-${{ runner.os }}-${{ hashFiles(".cache.json") }}
+          key: reader-cache-${{ runner.os }}-${{ hashFiles('.cache.json') }}
           restore-keys: |
             reader-cache-${{ runner.os }}-
 
@@ -52,7 +52,6 @@ jobs:
             [ "${{ inputs.verbose }}" = "true" ] && ARGS="$ARGS --verbose"
             [ "${{ inputs.prune_stale }}" = "true" ] && ARGS="$ARGS --prune-stale --stale-days=${{ inputs.stale_days }}"
           else
-            # On schedule: always prune stale
             ARGS="--prune-stale --stale-days=30"
           fi
           node process-feed.js $ARGS
@@ -64,7 +63,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache.json
-          key: reader-cache-${{ runner.os }}-${{ hashFiles(".cache.json") }}
+          key: reader-cache-${{ runner.os }}-${{ hashFiles('.cache.json') }}
 
       - name: Notify on failure
         if: failure()
