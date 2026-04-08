@@ -18,6 +18,9 @@ const verbose = args.includes('--verbose');
 const noCache = args.includes('--no-cache');
 const archiveLater = args.includes('--archive-later');
 const archiveSkipped = args.includes('--archive-skipped');
+const pruneStale = args.includes('--prune-stale');
+const staleDaysArg = args.find(a => a.startsWith('--stale-days='));
+const staleDays = staleDaysArg ? parseInt(staleDaysArg.split('=')[1], 10) : 30;
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
 const sinceArg = args.find(a => a.startsWith('--since='));
@@ -342,7 +345,67 @@ function printSummary() {
     console.log(`\nSkipped - already processed (cached): ${stats.skippedCached}`);
   }
 
+  if (stats.pruned && stats.pruned.length > 0) {
+    console.log(`\nPruned - stale (${stats.pruned.length}):`); 
+    stats.pruned.slice(0, 10).forEach(t => console.log(`  - ${t}`));
+    if (stats.pruned.length > 10) console.log(`  ... and ${stats.pruned.length - 10} more`);
+  }
+
   console.log('\n' + '='.repeat(60));
+}
+
+// Prune stale articles from Feed and Later
+async function pruneStaleArticles(days) {
+  console.log('='.repeat(60));
+  console.log(`PRUNING STALE ARTICLES (not opened in ${days}+ days)`);
+  console.log('='.repeat(60));
+  console.log('');
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  log(`Cutoff date: ${cutoff.toISOString().split('T')[0]}`);
+
+  let pruned = [];
+  let skipped = [];
+
+  for (const location of ['feed', 'later']) {
+    const docs = await fetchDocuments(location);
+    log(`\nChecking ${docs.length} document(s) in ${location}...`);
+
+    for (const doc of docs) {
+      const title = doc.title || doc.url || `ID: ${doc.id}`;
+
+      // Determine the last interaction date.
+      // last_opened_at is most accurate; fall back to created_at.
+      const lastTouched = doc.last_opened_at || doc.created_at;
+      if (!lastTouched) {
+        log(`  Skipping (no date): ${title}`);
+        skipped.push(title);
+        continue;
+      }
+
+      const lastDate = new Date(lastTouched);
+      const daysSince = Math.floor((Date.now() - lastDate) / (1000 * 60 * 60 * 24));
+
+      if (lastDate < cutoff) {
+        log(`  Stale (${daysSince}d): ${title}`);
+        if (dryRun) {
+          log(`    [DRY RUN] Would archive`);
+        } else {
+          await delay(DELAY_MS);
+          await updateDocumentLocation(doc.id, 'archive');
+        }
+        pruned.push(`${title} (${daysSince}d, ${location})`);
+      } else {
+        log(`  Fresh (${daysSince}d): ${title}`);
+      }
+    }
+  }
+
+  console.log(`\n${dryRun ? '[DRY RUN] Would prune' : 'Pruned'}: ${pruned.length} stale article(s)`);
+  if (skipped.length > 0) console.log(`Skipped (no date): ${skipped.length}`);
+
+  return pruned;
 }
 
 async function main() {
@@ -354,13 +417,23 @@ async function main() {
   if (sinceDays) console.log(`Since: ${sinceDays} days`);
   console.log('');
 
+  if (pruneStale) console.log(`Prune stale: ON (>${staleDays} days)`);
+
   try {
+    if (pruneStale) {
+      const pruned = await pruneStaleArticles(staleDays);
+      stats.pruned = pruned;
+      console.log('');
+    }
+
     if (archiveLater) {
       await archiveAllLater();
       console.log('');
     }
 
-    await processFeed();
+    if (!pruneStale || archiveLater || true) {
+      await processFeed();
+    }
 
   } catch (error) {
     console.error('Error:', error.message);
