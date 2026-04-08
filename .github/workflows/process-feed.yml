@@ -2,7 +2,7 @@ name: Process Reader Feed
 
 on:
   schedule:
-    - cron: "0 */6 * * *"  # Every 6 hours (was: every hour)
+    - cron: "0 */6 * * *"  # Every 6 hours
   workflow_dispatch:
     inputs:
       verbose:
@@ -10,6 +10,16 @@ on:
         required: false
         default: "false"
         type: boolean
+      prune_stale:
+        description: "Archive articles not opened in 30+ days"
+        required: false
+        default: "false"
+        type: boolean
+      stale_days:
+        description: "Days threshold for stale pruning"
+        required: false
+        default: "30"
+        type: string
 
 jobs:
   process:
@@ -36,7 +46,16 @@ jobs:
             reader-cache-${{ runner.os }}-
 
       - name: Process Feed
-        run: node process-feed.js ${{ (github.event_name == "workflow_dispatch" && inputs.verbose == "true") && "--verbose" || "" }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ inputs.verbose }}" = "true" ] && ARGS="$ARGS --verbose"
+            [ "${{ inputs.prune_stale }}" = "true" ] && ARGS="$ARGS --prune-stale --stale-days=${{ inputs.stale_days }}"
+          else
+            # On schedule: always prune stale
+            ARGS="--prune-stale --stale-days=30"
+          fi
+          node process-feed.js $ARGS
         env:
           READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
 
