@@ -21,6 +21,9 @@ const archiveSkipped = args.includes('--archive-skipped');
 const pruneStale = args.includes('--prune-stale');
 const staleDaysArg = args.find(a => a.startsWith('--stale-days='));
 const staleDays = staleDaysArg ? parseInt(staleDaysArg.split('=')[1], 10) : 30;
+const nukeLater = args.includes('--nuke-later');
+const nukeDaysArg = args.find(a => a.startsWith('--nuke-days='));
+const nukeDays = nukeDaysArg ? parseInt(nukeDaysArg.split('=')[1], 10) : 30;
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
 const sinceArg = args.find(a => a.startsWith('--since='));
@@ -195,6 +198,61 @@ async function archiveAllLater() {
 
   console.log('\n' + '='.repeat(60));
   console.log(`${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${archived} document(s)`);
+  console.log('='.repeat(60));
+}
+
+// Nuke Later: archive everything older than N days, no Ghostreader dependency
+async function nukeLaterArticles(days) {
+  console.log('='.repeat(60));
+  console.log(`NUKING LATER — archiving everything older than ${days} days`);
+  console.log('='.repeat(60));
+  console.log('');
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  console.log(`Cutoff: ${cutoff.toISOString().split('T')[0]} (anything saved before this gets archived)\n`);
+
+  const docs = await fetchDocuments('later');
+  console.log(`Found ${docs.length} document(s) in Later`);
+
+  let nuked = 0;
+  let kept = 0;
+  let noDate = 0;
+
+  for (const doc of docs) {
+    const title = doc.title || doc.url || `ID: ${doc.id}`;
+    // Use saved_at first (when it was added to Reader), then created_at
+    const savedAt = doc.saved_at || doc.created_at;
+
+    if (!savedAt) {
+      console.log(`  No date: ${title}`);
+      noDate++;
+      continue;
+    }
+
+    const savedDate = new Date(savedAt);
+    const daysSince = Math.floor((Date.now() - savedDate) / (1000 * 60 * 60 * 24));
+
+    if (savedDate < cutoff) {
+      if (verbose) console.log(`  Archiving (${daysSince}d old): ${title}`);
+      if (!dryRun) {
+        await delay(DELAY_MS);
+        await updateDocumentLocation(doc.id, 'archive');
+      }
+      nuked++;
+    } else {
+      if (verbose) console.log(`  Keeping (${daysSince}d old): ${title}`);
+      kept++;
+    }
+
+    // Progress every 50 docs
+    if ((nuked + kept) % 50 === 0) {
+      console.log(`  Progress: ${nuked} archived, ${kept} kept so far...`);
+    }
+  }
+
+  console.log('\n' + '='.repeat(60));
+  console.log(`${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${nuked} | Kept: ${kept} | No date: ${noDate}`);
   console.log('='.repeat(60));
 }
 
@@ -418,8 +476,14 @@ async function main() {
   console.log('');
 
   if (pruneStale) console.log(`Prune stale: ON (>${staleDays} days)`);
+  if (nukeLater) console.log(`Nuke Later: ON (archive everything >${nukeDays} days old)`);
 
   try {
+    if (nukeLater) {
+      await nukeLaterArticles(nukeDays);
+      console.log('');
+    }
+
     if (pruneStale) {
       const pruned = await pruneStaleArticles(staleDays);
       stats.pruned = pruned;
