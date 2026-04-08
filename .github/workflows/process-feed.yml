@@ -2,8 +2,14 @@ name: Process Reader Feed
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Every hour
-  workflow_dispatch:  # Manual trigger from GitHub UI
+    - cron: "0 */6 * * *"  # Every 6 hours (was: every hour)
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: "Enable verbose logging"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   process:
@@ -16,9 +22,34 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: .cache.json
+          key: reader-cache-${{ runner.os }}-${{ hashFiles(".cache.json") }}
+          restore-keys: |
+            reader-cache-${{ runner.os }}-
 
       - name: Process Feed
-        run: node process-feed.js --verbose
+        run: node process-feed.js ${{ (github.event_name == "workflow_dispatch" && inputs.verbose == "true") && "--verbose" || "" }}
         env:
           READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
+
+      - name: Save cache
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: .cache.json
+          key: reader-cache-${{ runner.os }}-${{ hashFiles(".cache.json") }}
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Workflow failed at $(date)" >> /tmp/failure.txt
+          echo "Run: https://github.com/ashwinma14/reader-processor/actions/runs/${{ github.run_id }}" >> /tmp/failure.txt
+          cat /tmp/failure.txt
