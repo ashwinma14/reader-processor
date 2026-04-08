@@ -20,6 +20,16 @@ on:
         required: false
         default: "30"
         type: string
+      nuke_later:
+        description: "Archive ALL Later items older than N days (no mercy)"
+        required: false
+        default: "false"
+        type: boolean
+      nuke_days:
+        description: "Age threshold for nuke-later (days)"
+        required: false
+        default: "30"
+        type: string
 
 jobs:
   process:
@@ -51,6 +61,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             [ "${{ inputs.verbose }}" = "true" ] && ARGS="$ARGS --verbose"
             [ "${{ inputs.prune_stale }}" = "true" ] && ARGS="$ARGS --prune-stale --stale-days=${{ inputs.stale_days }}"
+            [ "${{ inputs.nuke_later }}" = "true" ] && ARGS="$ARGS --nuke-later --nuke-days=${{ inputs.nuke_days }}"
           else
             ARGS="--prune-stale --stale-days=30"
           fi
