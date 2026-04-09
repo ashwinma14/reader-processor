@@ -174,16 +174,21 @@ function scoreDoc(doc) {
 }
 
 async function addTag(doc, tag) {
-  // Tags must be set via POST /save/ (upsert) — the /update/ PATCH endpoint doesn't support tags.
-  // The /save/ endpoint returns 200 if the doc already exists and merges the new tags.
-  const url = doc.source_url || doc.url;
+  // Tags must be set via POST /save/ (upsert). Use ONLY source_url, never Reader internal URLs.
+  const url = doc.source_url;
   if (!url) {
-    log(`  Cannot tag (no URL): ${doc.title || doc.id}`);
-    return;
+    throw new Error('missing source_url');
   }
   await apiRequest('/save/', {
     method: 'POST',
-    body: JSON.stringify({ url, tags: [tag] }),
+    body: JSON.stringify({
+      url,
+      title: doc.title,
+      author: doc.author,
+      category: doc.category,
+      location: doc.location,
+      tags: [tag],
+    }),
   });
 }
 
@@ -199,6 +204,8 @@ async function runShortlisting() {
 
   let tagged = 0;
   let skipped = 0;
+  let failed = 0;
+  const failures = [];
   const topArticles = [];
 
   for (const doc of docs) {
@@ -209,10 +216,18 @@ async function runShortlisting() {
       log(`  [${score}] SHORTLIST: ${title}`);
       log(`    ${breakdown.join(' | ')}`);
       if (!dryRun) {
-        await delay(DELAY_MS);
-        await addTag(doc, 'shortlist');
+        try {
+          await delay(DELAY_MS);
+          await addTag(doc, 'shortlist');
+          tagged++;
+        } catch (e) {
+          failed++;
+          failures.push(`${title} (${e.message})`);
+          log(`    tag failed: ${e.message}`);
+        }
+      } else {
+        tagged++;
       }
-      tagged++;
       topArticles.push({ score, title });
     } else {
       log(`  [${score}] skip: ${title}`);
@@ -225,8 +240,13 @@ async function runShortlisting() {
   console.log(`\nTop shortlisted articles:`);
   topArticles.slice(0, 10).forEach(a => console.log(`  [${a.score}] ${a.title}`));
 
+  if (failures.length > 0) {
+    console.log(`\nSample failures:`);
+    failures.slice(0, 10).forEach(f => console.log(`  - ${f}`));
+  }
+
   console.log('\n' + '='.repeat(60));
-  console.log(`${dryRun ? '[DRY RUN] Would tag' : 'Tagged'}: ${tagged} | Skipped: ${skipped}`);
+  console.log(`${dryRun ? '[DRY RUN] Would tag' : 'Tagged'}: ${tagged} | Failed: ${failed} | Skipped: ${skipped}`);
   console.log('='.repeat(60));
 }
 const limitArg = args.find(a => a.startsWith('--limit='));
