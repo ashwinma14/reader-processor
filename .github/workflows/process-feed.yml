@@ -35,6 +35,11 @@ on:
         required: false
         default: "false"
         type: boolean
+      ingest_newsletters:
+        description: "Ingest new newsletters from AgentMail inbox into Reader Later"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   process:
@@ -68,12 +73,14 @@ jobs:
             [ "${{ inputs.prune_stale }}" = "true" ] && ARGS="$ARGS --prune-stale --stale-days=${{ inputs.stale_days }}"
             [ "${{ inputs.nuke_later }}" = "true" ] && ARGS="$ARGS --nuke-later --nuke-days=${{ inputs.nuke_days }}"
             [ "${{ inputs.shortlist }}" = "true" ] && ARGS="$ARGS --shortlist"
+            [ "${{ inputs.ingest_newsletters }}" = "true" ] && ARGS="$ARGS --ingest-newsletters"
           else
-            ARGS="--shortlist --prune-stale --stale-days=30"
+            ARGS="--ingest-newsletters --shortlist --prune-stale --stale-days=30"
           fi
           node process-feed.js $ARGS
         env:
           READWISE_TOKEN: ${{ secrets.READWISE_TOKEN }}
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
 
       - name: Save cache
         if: always()
