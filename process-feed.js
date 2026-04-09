@@ -173,10 +173,17 @@ function scoreDoc(doc) {
   return { score, breakdown, shortlist: score >= SHORTLIST_THRESHOLD };
 }
 
-async function addTag(docId, tag) {
-  await apiRequest(`/update/${docId}/`, {
-    method: 'PATCH',
-    body: JSON.stringify({ tags: [tag] }),
+async function addTag(doc, tag) {
+  // Tags must be set via POST /save/ (upsert) — the /update/ PATCH endpoint doesn't support tags.
+  // The /save/ endpoint returns 200 if the doc already exists and merges the new tags.
+  const url = doc.source_url || doc.url;
+  if (!url) {
+    log(`  Cannot tag (no URL): ${doc.title || doc.id}`);
+    return;
+  }
+  await apiRequest('/save/', {
+    method: 'POST',
+    body: JSON.stringify({ url, tags: [tag] }),
   });
 }
 
@@ -203,7 +210,7 @@ async function runShortlisting() {
       log(`    ${breakdown.join(' | ')}`);
       if (!dryRun) {
         await delay(DELAY_MS);
-        await addTag(doc.id, 'shortlist');
+        await addTag(doc, 'shortlist');
       }
       tagged++;
       topArticles.push({ score, title });
