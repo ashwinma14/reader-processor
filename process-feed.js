@@ -109,38 +109,40 @@ async function ingestNewsletterEmails() {
   console.log('NEWSLETTER INGESTION (AgentMail → Reader Later)');
   console.log('='.repeat(60));
 
-  // Fetch unread messages
-  let messages;
+  // Fetch unread threads (threads contain full message bodies)
+  let threads;
   try {
-    const resp = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/messages?isRead=false&limit=50`);
-    messages = resp.messages || resp.items || resp || [];
-    if (!Array.isArray(messages)) messages = [];
+    const resp = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/threads?labels=unread&limit=50`);
+    threads = resp.threads || resp.items || resp || [];
+    if (!Array.isArray(threads)) threads = [];
   } catch (err) {
-    console.error(`Failed to fetch AgentMail messages: ${err.message}`);
+    console.error(`Failed to fetch AgentMail threads: ${err.message}`);
     return;
   }
 
-  console.log(`Found ${messages.length} unread message(s)`);
+  console.log(`Found ${threads.length} unread thread(s)`);
   let totalSaved = 0;
   let totalSkipped = 0;
 
-  for (const msg of messages) {
-    const subject = msg.subject || '(no subject)';
-    const msgId = msg.id || msg.messageId;
+  for (const thread of threads) {
+    const subject = thread.subject || '(no subject)';
+    const threadId = thread.thread_id || thread.id;
     log(`\nProcessing: ${subject}`);
 
-    // Fetch full message to get HTML body
-    let fullMsg;
+    // Fetch full thread to get message HTML bodies
+    let fullThread;
     try {
-      fullMsg = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/messages/${msgId}`);
+      fullThread = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/threads/${threadId}`);
     } catch (err) {
-      log(`  Could not fetch full message: ${err.message}`);
+      log(`  Could not fetch thread: ${err.message}`);
       continue;
     }
 
-    const html = fullMsg.html || fullMsg.body || '';
-    const urls = extractUrlsFromHtml(html);
-    log(`  Extracted ${urls.length} article URL(s)`);
+    // Thread messages are nested inside the thread object
+    const threadMessages = fullThread.messages || [];
+    const allHtml = threadMessages.map(m => m.html || m.body || '').join('\n');
+    const urls = extractUrlsFromHtml(allHtml);
+    log(`  Extracted ${urls.length} article URL(s) from ${threadMessages.length} message(s)`);
 
     for (const url of urls) {
       if (dryRun) {
@@ -158,15 +160,15 @@ async function ingestNewsletterEmails() {
       }
     }
 
-    // Mark message as read
-    if (!dryRun && msgId) {
+    // Mark thread as read
+    if (!dryRun && threadId) {
       try {
-        await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/messages/${msgId}`, {
+        await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/threads/${threadId}`, {
           method: 'PATCH',
-          body: JSON.stringify({ isRead: true }),
+          body: JSON.stringify({ labels: [] }),
         });
       } catch (err) {
-        log(`  Could not mark as read: ${err.message}`);
+        log(`  Could not mark thread as read: ${err.message}`);
       }
     }
   }
