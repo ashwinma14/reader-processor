@@ -431,6 +431,14 @@ async function nukeLaterArticles(days) {
     const savedDate = new Date(savedAt);
     const daysSince = Math.floor((Date.now() - savedDate) / (1000 * 60 * 60 * 24));
 
+    // Never nuke a shortlisted article — safety net even if order gets mixed up
+    const tags = (doc.tags || []).map(t => (typeof t === 'string' ? t : t.name || '').toLowerCase());
+    if (tags.includes('shortlist')) {
+      if (verbose) console.log(`  Protecting (shortlist tag): ${title}`);
+      kept++;
+      continue;
+    }
+
     if (savedDate < cutoff) {
       if (verbose) console.log(`  Archiving (${daysSince}d old): ${title}`);
       if (!dryRun) {
@@ -678,11 +686,13 @@ async function main() {
   if (scoreShortlist) console.log(`Shortlist: ON (threshold: ${SHORTLIST_THRESHOLD} pts)`);
 
   try {
+    // Shortlist FIRST so good articles are tagged before any nuking
     if (scoreShortlist) {
       await runShortlisting();
       console.log('');
     }
 
+    // Nuke AFTER shortlisting — shortlisted articles are protected inside nukeLaterArticles()
     if (nukeLater) {
       await nukeLaterArticles(nukeDays);
       console.log('');
