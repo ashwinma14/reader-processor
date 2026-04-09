@@ -173,11 +173,16 @@ function scoreDoc(doc) {
   return { score, breakdown, shortlist: score >= SHORTLIST_THRESHOLD };
 }
 
-async function moveToShortlist(docId) {
-  // Shortlist is a native Reader location — move via /update/ PATCH (same as moving to Later or Archive)
+async function moveToShortlist(docId, score, breakdown) {
+  // Shortlist is a native Reader location — move via /update/ PATCH
+  // Also write a brief scoring note so you know why it landed here
+  const note = `🎯 Shortlisted [${score}pts]: ${breakdown.join(' | ')}`;
   await apiRequest(`/update/${docId}/`, {
     method: 'PATCH',
-    body: JSON.stringify({ location: 'shortlist' }),
+    body: JSON.stringify({
+      location: 'shortlist',
+      notes: note,
+    }),
   });
 }
 
@@ -207,7 +212,7 @@ async function runShortlisting() {
       if (!dryRun) {
         try {
           await delay(DELAY_MS);
-          await moveToShortlist(doc.id);
+          await moveToShortlist(doc.id, score, breakdown);
           tagged++;
         } catch (e) {
           failed++;
