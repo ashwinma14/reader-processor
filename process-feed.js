@@ -79,10 +79,54 @@ function scoreDoc(doc) {
   score += catScore;
   breakdown.push(`category(${category}): +${catScore}`);
 
-  // --- Summary quality (0-15 pts) ---
-  const summaryScore = summary.length > 100 ? 15 : 0;
+  // --- Summary quality (0-35 pts) ---
+  let summaryScore = 0;
+
+  if (summary.length > 100) {
+    summaryScore += 15; // exists and substantive
+
+    // Substantive content bonus (+5): long summary = Ghostreader had real material
+    if (summary.length > 300) {
+      summaryScore += 5;
+      breakdown.push('summary_long: +5');
+    }
+
+    // Data signals (+5): suggests real research, not fluff
+    const dataSignals = ['%', '\$', 'study', 'research', 'found that', 'according to',
+      'survey', 'data shows', 'report', 'analysis'];
+    if (dataSignals.some(s => summary.toLowerCase().includes(s))) {
+      summaryScore += 5;
+      breakdown.push('summary_data_signals: +5');
+    }
+
+    // Non-redundant summary (+5): Ghostreader extracted something beyond the title
+    const titleWords = (doc.title || '').toLowerCase().split(/\s+/).filter(w => w.length > 4);
+    const summaryLower = summary.toLowerCase();
+    const overlapRatio = titleWords.length > 0
+      ? titleWords.filter(w => summaryLower.includes(w)).length / titleWords.length
+      : 1;
+    if (overlapRatio < 0.4) {
+      summaryScore += 5;
+      breakdown.push('summary_non_redundant: +5');
+    }
+
+    // Direct quote (+5): signals Ghostreader found depth worth quoting
+    if (/["\u201C\u201D].{20,}["\u201C\u201D]/.test(summary)) {
+      summaryScore += 5;
+      breakdown.push('summary_has_quote: +5');
+    }
+
+    // Summary spam signals (-10): newsletter/roundup disguised as article
+    const summarySpam = ['this newsletter', "this week's edition", 'roundup of',
+      'this issue', 'links this week', 'curated links'];
+    if (summarySpam.some(s => summary.toLowerCase().includes(s))) {
+      summaryScore -= 10;
+      breakdown.push('summary_spam: -10');
+    }
+  }
+
   score += summaryScore;
-  if (summaryScore) breakdown.push(`summary: +${summaryScore}`);
+  breakdown.push(`summary_base: +${Math.min(summaryScore, 15)}`);
 
   // --- Recency (0-20 pts) ---
   let recencyScore = 0;
