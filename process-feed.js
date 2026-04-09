@@ -267,11 +267,11 @@ async function demoteFromShortlist(docId) {
 }
 
 async function addLibraryTag(doc) {
-  const url = doc.source_url || doc.url;
-  if (!url) return;
-  await apiRequest('/save/', {
-    method: 'POST',
-    body: JSON.stringify({ url, tags: ['library'] }),
+  // Use PATCH /update/ with the doc's id — no risk of re-saving archived items to Later
+  if (!doc.id) return;
+  await apiRequest(`/update/${doc.id}/`, {
+    method: 'PATCH',
+    body: JSON.stringify({ tags: { library: { name: 'library' } } }),
   });
 }
 
@@ -739,7 +739,14 @@ async function main() {
       await archiveAllLater();
       console.log('');
     }
-    await processFeed();
+    // Only run feed processing if explicitly needed — don't run unconditionally
+    if (!scoreShortlist && !pruneStale && !nukeLater && !archiveLater) {
+      await processFeed();
+    } else if (archiveLater) {
+      // already handled above
+    } else {
+      // feed processing is a separate concern; skip unless nothing else was requested
+    }
   } catch (error) {
     console.error('Error:', error.message);
     process.exit(1);
