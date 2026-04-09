@@ -35,17 +35,30 @@ const AGENTMAIL_API_BASE = 'https://api.agentmail.to/v0';
 // URL patterns to skip when extracting from newsletter HTML
 const SKIP_URL_PATTERNS = [
   /unsubscribe/i, /manage.*subscription/i, /optout/i, /opt-out/i,
-  /click\?/i, /track\./i, /tracking\./i, /r\.substack\.com/i,
-  /mail\.beehiiv\.com/i, /open\.substack\.com/i,
-  /lists\./i, /email\./i, /campaign\./i,
+  /\/track\//i, /tracking\./i,
+  /mail\.beehiiv\.com/i,
+  /lists\./i, /campaign\./i,
   /mailto:/i, /\.gif$/i, /\.png$/i, /\.jpg$/i,
   /^https:\/\/(www\.)?google\.com/i,
   /^https:\/\/(www\.)?facebook\.com/i,
   /^https:\/\/(www\.)?twitter\.com/i,
-  /substack\.com\/(subscribe|account|login|profile|inbox)/i,
+  // Substack infra — skip everything except actual article pages
+  /substack\.com\/(subscribe|account|login|profile|inbox|app|app-link|redirect|@)/i,
+  /substackcdn\.com/i,
+  /substack\.com\/redirect/i,
+  // Mailchimp infra
+  /list-manage\.com/i,
+  /forward-to-friend\.com/i,
+  /mailchimp\.com/i,
+  /mcsv\.net/i,
+  // Newsletter nav/promo links
   /longreads\.com\/(about|subscribe|donate|store|tag|category|page)/i,
   /thebrowser\.com\/(about|subscribe|gift|account|login)/i,
   /managingeditor\.substack\.com\/(about|subscribe|account)/i,
+  // Tracking pixels and redirectors
+  /\/open\?token=/i,
+  /click\.ghost\./i,
+  /ghost\.io\/r\//i,
 ];
 
 // Minimum URL quality checks
