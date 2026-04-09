@@ -183,11 +183,8 @@ async function addTag(doc, tag) {
     method: 'POST',
     body: JSON.stringify({
       url,
-      title: doc.title,
-      author: doc.author,
-      category: doc.category,
-      location: doc.location,
       tags: [tag],
+      // DO NOT pass location — /save/ treats it as a move, which would restore archived articles to Later
     }),
   });
 }
