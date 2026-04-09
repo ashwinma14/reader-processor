@@ -26,11 +26,16 @@ const nukeDaysArg = args.find(a => a.startsWith('--nuke-days='));
 const nukeDays = nukeDaysArg ? parseInt(nukeDaysArg.split('=')[1], 10) : 30;
 const scoreShortlist = args.includes('--shortlist');
 
-// ─── Shortlist scoring ────────────────────────────────────────────────────────
+// ─── Shortlist config ─────────────────────────────────────────────────────────
 
 const SHORTLIST_THRESHOLD = 50;
+const SHORTLIST_CAP = 20;
+const SHORTLIST_DECAY_DAYS = 10;    // untouched for this many days → decay penalty
+const SHORTLIST_DECAY_PENALTY = 15; // points deducted for stale items
+const VIDEO_PDF_EXTRA = 10;         // videos/PDFs must beat threshold + this
 
-// Trusted domains get a boost. Everything else is neutral.
+// ─── Taxonomy ────────────────────────────────────────────────────────────────
+
 const TRUSTED_DOMAINS = [
   // Quality tech / product
   'stratechery.com', 'paulgraham.com', 'waitbutwhy.com', 'every.to',
@@ -41,7 +46,7 @@ const TRUSTED_DOMAINS = [
   'bloomberg.com', 'wsj.com', 'economist.com', 'ft.com',
   // Tech news
   'techcrunch.com', 'theverge.com', 'wired.com', 'arstechnica.com',
-  'simonwillison.net', 'macstories.net', 'daring fireball.net',
+  'simonwillison.net', 'macstories.net', 'daringfireball.net',
 ];
 
 const SPAM_TITLE_SIGNALS = [
@@ -50,6 +55,56 @@ const SPAM_TITLE_SIGNALS = [
   'this week in', 'weekend reads', 'morning links',
 ];
 
+// Reference/how-to content → Library tag, not Shortlist
+const LIBRARY_SIGNALS = [
+  'how to ', 'guide to', 'framework for', 'template for', 'cheat sheet',
+  'reference guide', 'step by step', 'tutorial', 'handbook', 'playbook',
+  'getting started', 'complete guide', 'beginners guide', 'crash course',
+];
+
+// Topic clusters for diversity enforcement
+const TOPIC_CLUSTERS = {
+  ai_ml: ['artificial intelligence', ' ai ', 'llm', 'machine learning', 'gpt',
+    'claude', 'openai', 'anthropic', 'neural network', 'foundation model',
+    'ai agent', 'chatgpt', 'gemini', 'language model'],
+  product: ['product manager', 'product management', 'product strategy', 'roadmap',
+    'user research', 'product market fit', 'prioritization', 'sprint', 'backlog'],
+  startup_vc: ['startup', 'venture capital', 'fundraising', 'seed round', 'series a',
+    'series b', 'founder', ' vc ', 'valuation', 'exit strategy', 'ipo'],
+  org_leadership: ['org design', 'leadership', 'management', 'company culture',
+    'team building', 'hiring', 'performance review', 'executive', 'ceo', 'strategy'],
+  writing_ideas: ['writing', 'essay', 'mental model', 'decision making', 'cognitive bias',
+    'reasoning', 'thinking clearly', 'philosophy'],
+};
+
+function detectCluster(doc) {
+  const text = ((doc.title || '') + ' ' + (doc.summary || '')).toLowerCase();
+  for (const [cluster, keywords] of Object.entries(TOPIC_CLUSTERS)) {
+    if (keywords.some(kw => text.includes(kw))) return cluster;
+  }
+  return 'other';
+}
+
+function isLibraryContent(doc) {
+  const text = ((doc.title || '') + ' ' + (doc.summary || '')).toLowerCase();
+  return LIBRARY_SIGNALS.some(s => text.includes(s));
+}
+
+function isHeavyFormat(doc) {
+  const cat = (doc.category || '').toLowerCase();
+  return cat === 'video' || cat === 'pdf' || cat === 'podcast';
+}
+
+function getDomain(doc) {
+  try {
+    return new URL(doc.url || '').hostname.replace(/^www\./, '');
+  } catch (_) {
+    return 'unknown';
+  }
+}
+
+// ─── Scoring ─────────────────────────────────────────────────────────────────
+
 function scoreDoc(doc) {
   let score = 0;
   const breakdown = [];
@@ -57,72 +112,58 @@ function scoreDoc(doc) {
   const category = (doc.category || 'article').toLowerCase();
   const summary = doc.summary || '';
   const url = doc.url || '';
-  const readingProgress = doc.reading_progress || 0; // 0.0 to 1.0
+  const readingProgress = doc.reading_progress || 0;
   const wordCount = doc.word_count || 0;
   const savedAt = doc.saved_at || doc.created_at;
 
   // --- Category (0-30 pts) ---
   let catScore = 0;
-  if (category === 'article') {
-    catScore = 30;
-  } else if (category === 'pdf') {
-    catScore = 20;
-  } else if (category === 'tweet') {
-    // Thread detection: thread emoji OR substantial word count
-    const isThread = title.includes('\uD83E\uDDF5') || title.includes('thread') || wordCount > 200;
+  if (category === 'article') catScore = 30;
+  else if (category === 'pdf') catScore = 20;
+  else if (category === 'tweet') {
+    const isThread = title.includes('🧵') || title.includes('thread') || wordCount > 200;
     catScore = isThread ? 20 : 5;
-  } else if (category === 'email') {
-    catScore = 5;
-  } else {
-    catScore = 10; // video, podcast, etc.
-  }
+  } else if (category === 'email') catScore = 5;
+  else catScore = 10; // video, podcast, etc.
   score += catScore;
   breakdown.push(`category(${category}): +${catScore}`);
 
   // --- Summary quality (0-35 pts) ---
   let summaryScore = 0;
-
   if (summary.length > 100) {
-    summaryScore += 15; // exists and substantive
-
-    // Substantive content bonus (+5): long summary = Ghostreader had real material
-    if (summary.length > 300) {
-      summaryScore += 5;
-      breakdown.push('summary_long: +5');
-    }
-
-    // Data signals (+5): suggests real research, not fluff
-    const dataSignals = ['%', '\$', 'study', 'research', 'found that', 'according to',
+    summaryScore += 15;
+    if (summary.length > 300) { summaryScore += 5; breakdown.push('summary_long: +5'); }
+    const dataSignals = ['%', '$', 'study', 'research', 'found that', 'according to',
       'survey', 'data shows', 'report', 'analysis'];
     if (dataSignals.some(s => summary.toLowerCase().includes(s))) {
       summaryScore += 5;
       breakdown.push('summary_data_signals: +5');
     }
-
-    // Non-redundant summary (+5): Ghostreader extracted something beyond the title
     const titleWords = (doc.title || '').toLowerCase().split(/\s+/).filter(w => w.length > 4);
     const summaryLower = summary.toLowerCase();
     const overlapRatio = titleWords.length > 0
       ? titleWords.filter(w => summaryLower.includes(w)).length / titleWords.length
       : 1;
-    if (overlapRatio < 0.4) {
-      summaryScore += 5;
-      breakdown.push('summary_non_redundant: +5');
-    }
-
-    // Direct quote (+5): signals Ghostreader found depth worth quoting
-    if (/["\u201C\u201D].{20,}["\u201C\u201D]/.test(summary)) {
+    if (overlapRatio < 0.4) { summaryScore += 5; breakdown.push('summary_non_redundant: +5'); }
+    if (/[""\u201C\u201D].{20,}[""\u201C\u201D]/.test(summary)) {
       summaryScore += 5;
       breakdown.push('summary_has_quote: +5');
     }
-
-    // Summary spam signals (-10): newsletter/roundup disguised as article
     const summarySpam = ['this newsletter', "this week's edition", 'roundup of',
       'this issue', 'links this week', 'curated links'];
     if (summarySpam.some(s => summary.toLowerCase().includes(s))) {
       summaryScore -= 10;
       breakdown.push('summary_spam: -10');
     }
+  }
+
+  // Writing fuel signal (+5): suggests an angle worth thinking/blogging about
+  const writingFuelSignals = ['argues that', 'counterintuitive', 'most people',
+    'the real reason', 'unpopular opinion', 'this changes', 'what nobody',
+    'the problem with', 'case for', 'case against', 'why most', 'overlooked'];
+  if (writingFuelSignals.some(s => (summary + title).toLowerCase().includes(s))) {
+    summaryScore += 5;
+    breakdown.push('writing_fuel: +5');
   }
 
   score += summaryScore;
@@ -143,45 +184,40 @@ function scoreDoc(doc) {
   // --- Reading progress (0-15 pts) ---
   let progressScore = 0;
   const pct = readingProgress * 100;
-  if (pct > 0 && pct < 90) {
-    progressScore = 15; // started but unfinished
-  } else if (pct === 0) {
-    progressScore = 5;
-  }
-  // finished (>=90%) gets 0 — already done
+  if (pct > 0 && pct < 90) progressScore = 15;
+  else if (pct === 0) progressScore = 5;
   score += progressScore;
   breakdown.push(`progress(${Math.round(pct)}%): +${progressScore}`);
 
   // --- Spam title penalty (-30 pts) ---
-  const isSpam = SPAM_TITLE_SIGNALS.some(s => title.includes(s));
-  if (isSpam) {
+  if (SPAM_TITLE_SIGNALS.some(s => title.includes(s))) {
     score -= 30;
     breakdown.push('spam_title: -30');
   }
 
   // --- Domain boost (+15 pts) ---
-  let domainScore = 0;
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, '');
     if (TRUSTED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))) {
-      domainScore = 15;
-      score += domainScore;
-      breakdown.push(`trusted_domain(${hostname}): +${domainScore}`);
+      score += 15;
+      breakdown.push(`trusted_domain(${hostname}): +15`);
     }
   } catch (_) {}
 
   return { score, breakdown, shortlist: score >= SHORTLIST_THRESHOLD };
 }
 
-function humanizeShortlistReason(score, breakdown) {
+// ─── Notes ───────────────────────────────────────────────────────────────────
+
+function humanizeShortlistReason(score, breakdown, decayApplied) {
   const reasons = [];
 
   const category = breakdown.find((b) => b.startsWith('category('));
   if (category?.includes('article')) reasons.push('it\'s a full article');
   else if (category?.includes('email')) reasons.push('it looks like a high-signal newsletter');
   else if (category?.includes('tweet')) reasons.push('it looks like a worthwhile thread or tweet');
-  else if (category?.includes('video')) reasons.push('it looks like a video worth watching');
-  else if (category?.includes('pdf')) reasons.push('it looks like a solid PDF/doc');
+  else if (category?.includes('video')) reasons.push('it\'s a video that scored unusually well');
+  else if (category?.includes('pdf')) reasons.push('it\'s a document worth your time');
 
   const recency = breakdown.find((b) => b.startsWith('recency('));
   if (recency) {
@@ -190,102 +226,224 @@ function humanizeShortlistReason(score, breakdown) {
       const days = Number(m[1]);
       if (days <= 3) reasons.push('it\'s very recent');
       else if (days <= 7) reasons.push('it\'s still fresh');
-      else reasons.push('it still seems worth surfacing');
+      else reasons.push('it\'s older but still worth surfacing');
     }
   }
 
   if (breakdown.some((b) => b.startsWith('trusted_domain('))) {
-    reasons.push('it came from a source you probably want to pay attention to');
+    reasons.push('it came from a source worth paying attention to');
   }
 
-  if (breakdown.some((b) => b.startsWith('summary_base'))) {
+  if (breakdown.some((b) => b.includes('writing_fuel'))) {
+    reasons.push('the angle seems worth thinking about');
+  } else if (breakdown.some((b) => b.startsWith('summary_base'))) {
     reasons.push('the summary suggests there\'s real substance here');
   }
 
-  if (breakdown.some((b) => b.includes('summary_has_quote'))) {
-    reasons.push('it had at least one concrete idea worth pulling forward');
-  }
-
-  if (breakdown.some((b) => b.startsWith('progress(') && !b.includes('100%'))) {
-    reasons.push('you haven\'t really gotten through it yet');
-  }
-
   const cleanReasons = [...new Set(reasons)].slice(0, 3);
-  const why = cleanReasons.length ? cleanReasons.join(', ') : 'it scored well across freshness, substance, and source quality';
+  const why = cleanReasons.length
+    ? cleanReasons.join(', ')
+    : 'it scored well across freshness, substance, and source quality';
 
-  return `Why this made Shortlist: ${why}. Score: ${score}.`;
+  const suffix = decayApplied ? ' (survived decay — still worth opening)' : '';
+  return `Worth reading soon: ${why}. Score: ${score}.${suffix}`;
 }
 
-async function moveToShortlist(docId, score, breakdown) {
-  // Shortlist is a native Reader location — move via /update/ PATCH
-  // Also write a brief human-readable note so you know why it landed here
-  const note = humanizeShortlistReason(score, breakdown);
+// ─── API helpers ──────────────────────────────────────────────────────────────
+
+async function moveToShortlist(docId, score, breakdown, decayApplied = false) {
+  const note = humanizeShortlistReason(score, breakdown, decayApplied);
   await apiRequest(`/update/${docId}/`, {
     method: 'PATCH',
-    body: JSON.stringify({
-      location: 'shortlist',
-      notes: note,
-    }),
+    body: JSON.stringify({ location: 'shortlist', notes: note }),
   });
 }
 
+async function demoteFromShortlist(docId) {
+  await apiRequest(`/update/${docId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify({ location: 'later' }),
+  });
+}
+
+async function addLibraryTag(doc) {
+  const url = doc.source_url || doc.url;
+  if (!url) return;
+  await apiRequest('/save/', {
+    method: 'POST',
+    body: JSON.stringify({ url, tags: ['library'] }),
+  });
+}
+
+// ─── Shortlisting v2 ─────────────────────────────────────────────────────────
+
 async function runShortlisting() {
   console.log('='.repeat(60));
-  console.log('SHORTLIST SCORING (Later → move to Shortlist)');
-  console.log(`Threshold: ${SHORTLIST_THRESHOLD} pts`);
+  console.log('SHORTLIST v2');
+  console.log(`Cap: ${SHORTLIST_CAP} | Threshold: ${SHORTLIST_THRESHOLD} | Decay: ${SHORTLIST_DECAY_DAYS}d → -${SHORTLIST_DECAY_PENALTY}pts`);
   console.log('='.repeat(60));
   console.log('');
 
-  const docs = await fetchDocuments('later');
-  console.log(`Scoring ${docs.length} document(s) in Later...\n`);
+  // 1. Fetch current Shortlist items
+  console.log('Fetching current Shortlist...');
+  const currentShortlist = await fetchDocuments('shortlist');
+  console.log(`  ${currentShortlist.length} items currently in Shortlist`);
 
-  let tagged = 0;
-  let skipped = 0;
-  let failed = 0;
-  const failures = [];
-  const topArticles = [];
-
-  for (const doc of docs) {
-    const title = doc.title || doc.url || `ID: ${doc.id}`;
-    const { score, breakdown, shortlist } = scoreDoc(doc);
-
-    if (shortlist) {
-      log(`  [${score}] SHORTLIST: ${title}`);
-      log(`    ${breakdown.join(' | ')}`);
-      if (!dryRun) {
-        try {
-          await delay(DELAY_MS);
-          await moveToShortlist(doc.id, score, breakdown);
-          tagged++;
-        } catch (e) {
-          failed++;
-          failures.push(`${title} (${e.message})`);
-          log(`    move failed: ${e.message}`);
-        }
-      } else {
-        tagged++;
+  // Score existing Shortlist items; apply decay if untouched
+  const currentScored = currentShortlist.map(doc => {
+    const { score, breakdown } = scoreDoc(doc);
+    const lastTouched = doc.last_opened_at || doc.updated_at || doc.saved_at;
+    let effectiveScore = score;
+    let decayApplied = false;
+    if (lastTouched) {
+      const daysSince = Math.floor((Date.now() - new Date(lastTouched)) / (1000 * 60 * 60 * 24));
+      if (daysSince >= SHORTLIST_DECAY_DAYS) {
+        effectiveScore -= SHORTLIST_DECAY_PENALTY;
+        decayApplied = true;
+        log(`  [DECAY -${SHORTLIST_DECAY_PENALTY}] ${doc.title || doc.url} (${daysSince}d untouched)`);
       }
-      topArticles.push({ score, title });
-    } else {
-      log(`  [${score}] skip: ${title}`);
-      skipped++;
+    }
+    return { doc, score, effectiveScore, breakdown, inShortlist: true, decayApplied };
+  });
+
+  // 2. Fetch Later docs
+  console.log('\nFetching Later...');
+  const laterDocs = await fetchDocuments('later');
+  console.log(`  ${laterDocs.length} items in Later`);
+
+  // 3. Filter library candidates and score the rest
+  const libraryCandidates = [];
+  const laterCandidates = [];
+
+  for (const doc of laterDocs) {
+    if (isLibraryContent(doc)) {
+      libraryCandidates.push(doc);
+      continue;
+    }
+    const { score, breakdown } = scoreDoc(doc);
+    const threshold = isHeavyFormat(doc)
+      ? SHORTLIST_THRESHOLD + VIDEO_PDF_EXTRA
+      : SHORTLIST_THRESHOLD;
+    if (score >= threshold) {
+      laterCandidates.push({ doc, score, effectiveScore: score, breakdown, inShortlist: false, decayApplied: false });
     }
   }
 
-  // Print top 10 by score regardless of verbose
-  topArticles.sort((a, b) => b.score - a.score);
-  console.log(`\nTop shortlisted articles:`);
-  topArticles.slice(0, 10).forEach(a => console.log(`  [${a.score}] ${a.title}`));
+  console.log(`\n  Library candidates (will be tagged, not shortlisted): ${libraryCandidates.length}`);
+  console.log(`  Later candidates above threshold: ${laterCandidates.length}`);
 
-  if (failures.length > 0) {
-    console.log(`\nSample failures:`);
-    failures.slice(0, 10).forEach(f => console.log(`  - ${f}`));
+  // 4. Tag library content
+  let libTagged = 0;
+  for (const doc of libraryCandidates) {
+    log(`  [LIBRARY] ${doc.title || doc.url}`);
+    if (!dryRun) {
+      try {
+        await delay(DELAY_MS);
+        await addLibraryTag(doc);
+        libTagged++;
+      } catch (e) {
+        log(`    library tag failed: ${e.message}`);
+      }
+    } else {
+      libTagged++;
+    }
+  }
+  console.log(`  Library tagged: ${libTagged}`);
+
+  // 5. Diversity filter on Later candidates (max 2 per domain, max 2 per cluster)
+  const domainCounts = {};
+  const clusterCounts = {};
+  const diversified = [];
+
+  laterCandidates.sort((a, b) => b.effectiveScore - a.effectiveScore);
+
+  for (const c of laterCandidates) {
+    const domain = getDomain(c.doc);
+    const cluster = detectCluster(c.doc);
+
+    domainCounts[domain] = (domainCounts[domain] || 0) + 1;
+    clusterCounts[cluster] = (clusterCounts[cluster] || 0) + 1;
+
+    if (domainCounts[domain] > 2) {
+      log(`  [DIVERSITY skip domain=${domain}] ${c.doc.title}`);
+      continue;
+    }
+    if (cluster !== 'other' && clusterCounts[cluster] > 2) {
+      log(`  [DIVERSITY skip cluster=${cluster}] ${c.doc.title}`);
+      continue;
+    }
+
+    diversified.push(c);
+  }
+
+  console.log(`  After diversity filter: ${diversified.length} Later candidates`);
+
+  // 6. Merge and rank — pick top SHORTLIST_CAP
+  const allCandidates = [...currentScored, ...diversified];
+  allCandidates.sort((a, b) => b.effectiveScore - a.effectiveScore);
+
+  const winners = allCandidates.slice(0, SHORTLIST_CAP);
+  const winnerIds = new Set(winners.map(c => c.doc.id));
+
+  // 7. Demote Shortlist items that didn't survive
+  const toDemote = currentScored.filter(c => !winnerIds.has(c.doc.id));
+  // 8. Promote new items from Later
+  const toPromote = diversified.filter(c => winnerIds.has(c.doc.id));
+
+  console.log(`\nShortlist changes:`);
+  console.log(`  Keeping in Shortlist: ${currentScored.length - toDemote.length}`);
+  console.log(`  Demoting back to Later: ${toDemote.length}`);
+  console.log(`  Promoting from Later: ${toPromote.length}`);
+  console.log(`  Final Shortlist size: ${winners.length}`);
+
+  // Execute demotions
+  let demoted = 0;
+  for (const c of toDemote) {
+    log(`  [DEMOTE] ${c.doc.title || c.doc.url} (score: ${c.effectiveScore})`);
+    if (!dryRun) {
+      await delay(DELAY_MS);
+      try {
+        await demoteFromShortlist(c.doc.id);
+        demoted++;
+      } catch (e) {
+        log(`    demote failed: ${e.message}`);
+      }
+    } else {
+      demoted++;
+    }
+  }
+
+  // Execute promotions
+  let promoted = 0;
+  let promoteFailed = 0;
+  for (const c of toPromote) {
+    log(`  [PROMOTE] [${c.effectiveScore}] ${c.doc.title || c.doc.url}`);
+    if (!dryRun) {
+      await delay(DELAY_MS);
+      try {
+        await moveToShortlist(c.doc.id, c.score, c.breakdown, c.decayApplied);
+        promoted++;
+      } catch (e) {
+        promoteFailed++;
+        log(`    promote failed: ${e.message}`);
+      }
+    } else {
+      promoted++;
+    }
   }
 
   console.log('\n' + '='.repeat(60));
-  console.log(`${dryRun ? '[DRY RUN] Would tag' : 'Tagged'}: ${tagged} | Failed: ${failed} | Skipped: ${skipped}`);
+  console.log(`${dryRun ? '[DRY RUN] ' : ''}Promoted: ${promoted} | Demoted: ${demoted} | Library: ${libTagged} | Failed: ${promoteFailed}`);
+
+  // Print final shortlist
+  console.log('\nFinal Shortlist (projected):');
+  winners.forEach(c => {
+    const flag = c.inShortlist ? (c.decayApplied ? '↩' : '✓') : '↑';
+    console.log(`  ${flag} [${c.effectiveScore}] ${c.doc.title || c.doc.url}`);
+  });
   console.log('='.repeat(60));
 }
+
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
 const sinceArg = args.find(a => a.startsWith('--since='));
@@ -293,32 +451,26 @@ const sinceDays = sinceArg ? parseInt(sinceArg.split('=')[1], 10) : null;
 
 // Cache functions
 function loadCache() {
-  if (noCache || !existsSync(CACHE_FILE)) {
-    return { processed: {} };
-  }
+  if (noCache || !existsSync(CACHE_FILE)) return { processed: {} };
   try {
     return JSON.parse(readFileSync(CACHE_FILE, 'utf8'));
   } catch {
     return { processed: {} };
   }
 }
-
 function saveCache(cache) {
   if (dryRun || noCache) return;
   writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
 }
-
 const cache = loadCache();
 
 // Get token from environment
 const token = process.env.READWISE_TOKEN;
 if (!token) {
   console.error('Error: READWISE_TOKEN environment variable is required');
-  console.error('Get your token from: https://readwise.io/access_token');
   process.exit(1);
 }
 
-// Stats tracking
 let stats = {
   total: 0,
   promoted: [],
@@ -327,100 +479,70 @@ let stats = {
   skippedNoRead: [],
   skippedNoSummary: [],
   skippedCached: 0,
-  skippedTooOld: 0
+  skippedTooOld: 0,
 };
 
 function log(message) {
-  if (verbose) {
-    console.log(message);
-  }
+  if (verbose) console.log(message);
 }
-
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function apiRequest(endpoint, options = {}) {
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
-
   const response = await fetch(url, {
     ...options,
     headers: {
       'Authorization': `Token ${token}`,
       'Content-Type': 'application/json',
-      ...options.headers
-    }
+      ...options.headers,
+    },
   });
-
   if (response.status === 429) {
     const retryAfter = response.headers.get('Retry-After') || 60;
-    console.warn(`Rate limited. Waiting ${retryAfter} seconds...`);
+    console.warn(`Rate limited. Waiting ${retryAfter}s...`);
     await delay(retryAfter * 1000);
     return apiRequest(endpoint, options);
   }
-
-  if (!response.ok) {
-    throw new Error(`API error: ${response.status} ${response.statusText}`);
-  }
-
+  if (!response.ok) throw new Error(`API error: ${response.status} ${response.statusText}`);
   return response.json();
 }
 
 async function fetchDocuments(location, maxDocs = null) {
   const documents = [];
   let cursor = null;
-
   log(`Fetching documents from ${location}...`);
-
   do {
     const endpoint = cursor
       ? `/list/?location=${location}&pageCursor=${cursor}`
       : `/list/?location=${location}`;
-
     const data = await apiRequest(endpoint);
-
-    // Filter to only get actual documents (not highlights/notes)
-    const docs = (data.results || []).filter(doc =>
-      doc.category !== 'highlight' && doc.category !== 'note'
+    const docs = (data.results || []).filter(
+      doc => doc.category !== 'highlight' && doc.category !== 'note'
     );
-
     documents.push(...docs);
     cursor = data.nextPageCursor;
-
-    log(`  Fetched ${docs.length} documents (total: ${documents.length})`);
-
-    // Stop early if we have enough documents
-    if (maxDocs && documents.length >= maxDocs) {
-      log(`  Stopping fetch (have ${documents.length}, need ${maxDocs})`);
-      break;
-    }
-
-    if (cursor) {
-      await delay(DELAY_MS);
-    }
+    log(`  Fetched ${docs.length} docs (total: ${documents.length})`);
+    if (maxDocs && documents.length >= maxDocs) break;
+    if (cursor) await delay(DELAY_MS);
   } while (cursor);
-
   return documents;
 }
 
 async function updateDocumentLocation(documentId, location) {
   await apiRequest(`/update/${documentId}/`, {
     method: 'PATCH',
-    body: JSON.stringify({ location })
+    body: JSON.stringify({ location }),
   });
 }
 
 function hasReadMarker(doc) {
-  const summary = doc.summary || '';
-  const notes = doc.notes || '';
-  return summary.includes(READ_MARKER) || notes.includes(READ_MARKER);
+  return (doc.summary || '').includes(READ_MARKER) || (doc.notes || '').includes(READ_MARKER);
 }
-
 function hasSummary(doc) {
-  const summary = doc.summary || '';
-  return summary.length > 0;
+  return (doc.summary || '').length > 0;
 }
-
 function isWithinDays(doc, days) {
   if (!days) return true;
   const docDate = new Date(doc.created_at || doc.updated_at);
@@ -429,194 +551,96 @@ function isWithinDays(doc, days) {
   return docDate >= cutoff;
 }
 
-// Archive all items in Later
 async function archiveAllLater() {
   console.log('='.repeat(60));
   console.log('ARCHIVING ALL LATER ITEMS');
   console.log('='.repeat(60));
-  console.log('');
-
   const documents = await fetchDocuments('later');
   console.log(`\nFound ${documents.length} document(s) in Later\n`);
-
-  if (documents.length === 0) {
-    console.log('Nothing to archive.');
-    return;
-  }
-
   let archived = 0;
   for (const doc of documents) {
-    const title = doc.title || doc.url || `ID: ${doc.id}`;
-    log(`Archiving: ${title}`);
-
-    if (dryRun) {
-      log(`  [DRY RUN] Would archive`);
-    } else {
+    log(`Archiving: ${doc.title || doc.url}`);
+    if (!dryRun) {
       await delay(DELAY_MS);
       await updateDocumentLocation(doc.id, 'archive');
     }
     archived++;
   }
-
-  console.log('\n' + '='.repeat(60));
-  console.log(`${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${archived} document(s)`);
-  console.log('='.repeat(60));
+  console.log(`\n${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${archived}`);
 }
 
-// Nuke Later: archive everything older than N days, no Ghostreader dependency
 async function nukeLaterArticles(days) {
   console.log('='.repeat(60));
   console.log(`NUKING LATER — archiving everything older than ${days} days`);
   console.log('='.repeat(60));
-  console.log('');
-
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
-  console.log(`Cutoff: ${cutoff.toISOString().split('T')[0]} (anything saved before this gets archived)\n`);
-
+  console.log(`Cutoff: ${cutoff.toISOString().split('T')[0]}\n`);
   const docs = await fetchDocuments('later');
-  console.log(`Found ${docs.length} document(s) in Later`);
-
-  let nuked = 0;
-  let kept = 0;
-  let noDate = 0;
-
+  let nuked = 0, kept = 0, noDate = 0;
   for (const doc of docs) {
-    const title = doc.title || doc.url || `ID: ${doc.id}`;
-    // Use saved_at first (when it was added to Reader), then created_at
     const savedAt = doc.saved_at || doc.created_at;
-
-    if (!savedAt) {
-      console.log(`  No date: ${title}`);
-      noDate++;
-      continue;
-    }
-
+    if (!savedAt) { noDate++; continue; }
     const savedDate = new Date(savedAt);
     const daysSince = Math.floor((Date.now() - savedDate) / (1000 * 60 * 60 * 24));
-
-    // Never nuke a shortlisted article — safety net even if order gets mixed up
-    const tags = (doc.tags || []).map(t => (typeof t === 'string' ? t : t.name || '').toLowerCase());
-    if (tags.includes('shortlist')) {
-      if (verbose) console.log(`  Protecting (shortlist tag): ${title}`);
-      kept++;
-      continue;
-    }
-
+    const tags = Object.keys(doc.tags || {}).map(t => t.toLowerCase());
+    if (tags.includes('shortlist')) { kept++; continue; }
     if (savedDate < cutoff) {
-      if (verbose) console.log(`  Archiving (${daysSince}d old): ${title}`);
       if (!dryRun) {
         await delay(DELAY_MS);
         await updateDocumentLocation(doc.id, 'archive');
       }
       nuked++;
     } else {
-      if (verbose) console.log(`  Keeping (${daysSince}d old): ${title}`);
       kept++;
     }
-
-    // Progress every 50 docs
-    if ((nuked + kept) % 50 === 0) {
-      console.log(`  Progress: ${nuked} archived, ${kept} kept so far...`);
-    }
+    if ((nuked + kept) % 50 === 0) console.log(`  Progress: ${nuked} archived, ${kept} kept...`);
   }
-
-  console.log('\n' + '='.repeat(60));
-  console.log(`${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${nuked} | Kept: ${kept} | No date: ${noDate}`);
-  console.log('='.repeat(60));
+  console.log(`\n${dryRun ? '[DRY RUN] Would archive' : 'Archived'}: ${nuked} | Kept: ${kept} | No date: ${noDate}`);
 }
 
-// Process Feed documents
 async function processFeed() {
   console.log('='.repeat(60));
   console.log('PROCESSING FEED');
   console.log('='.repeat(60));
   if (sinceDays) console.log(`Filtering to last ${sinceDays} days`);
-  console.log('');
-
   let documents = await fetchDocuments('feed', limit);
   stats.total = documents.length;
-
-  if (limit) {
-    console.log(`\nFetched ${documents.length} document(s) from Feed (limited to ${limit})`);
-    documents = documents.slice(0, limit);
-  } else {
-    console.log(`\nFound ${documents.length} document(s) in Feed`);
-  }
-  console.log('');
-
-  if (documents.length === 0) {
-    console.log('No documents to process.');
-    return;
-  }
+  if (limit) documents = documents.slice(0, limit);
+  console.log(`\nFound ${documents.length} document(s) in Feed\n`);
+  if (documents.length === 0) { console.log('Nothing to process.'); return; }
 
   for (const doc of documents) {
     const title = doc.title || doc.url || `ID: ${doc.id}`;
     const docId = doc.id;
-
-    // Skip if too old
-    if (sinceDays && !isWithinDays(doc, sinceDays)) {
-      log(`\nSkipping (too old): ${title}`);
-      stats.skippedTooOld++;
-      continue;
-    }
-
-    // Skip if already processed
-    if (cache.processed[docId]) {
-      log(`\nSkipping (cached): ${title}`);
-      stats.skippedCached++;
-      continue;
-    }
-
+    if (sinceDays && !isWithinDays(doc, sinceDays)) { stats.skippedTooOld++; continue; }
+    if (cache.processed[docId]) { stats.skippedCached++; continue; }
     log(`\nProcessing: ${title}`);
-
     if (!hasSummary(doc)) {
       if (archiveSkipped) {
-        log(`  No summary - archiving`);
-        if (dryRun) {
-          log(`  [DRY RUN] Would archive`);
-        } else {
-          await delay(DELAY_MS);
-          await updateDocumentLocation(docId, 'archive');
-        }
+        if (!dryRun) { await delay(DELAY_MS); await updateDocumentLocation(docId, 'archive'); }
         stats.archivedNoSummary.push(title);
         cache.processed[docId] = { archived: true };
       } else {
-        log(`  No summary yet (Ghostreader hasn't processed)`);
         stats.skippedNoSummary.push(title);
       }
       continue;
     }
-
     if (hasReadMarker(doc)) {
-      log(`  Found "${READ_MARKER}" marker - promoting to Later`);
-      if (dryRun) {
-        log(`  [DRY RUN] Would move to Later`);
-      } else {
-        await delay(DELAY_MS);
-        await updateDocumentLocation(docId, 'later');
-      }
+      if (!dryRun) { await delay(DELAY_MS); await updateDocumentLocation(docId, 'later'); }
       stats.promoted.push(title);
       cache.processed[docId] = { promoted: true };
     } else {
       if (archiveSkipped) {
-        log(`  No READ marker - archiving`);
-        if (dryRun) {
-          log(`  [DRY RUN] Would archive`);
-        } else {
-          await delay(DELAY_MS);
-          await updateDocumentLocation(docId, 'archive');
-        }
+        if (!dryRun) { await delay(DELAY_MS); await updateDocumentLocation(docId, 'archive'); }
         stats.archivedNoRead.push(title);
         cache.processed[docId] = { archived: true };
       } else {
-        log(`  Has summary but no READ marker`);
         stats.skippedNoRead.push(title);
         cache.processed[docId] = { promoted: false };
       }
     }
   }
-
   saveCache(cache);
   printSummary();
 }
@@ -625,114 +649,63 @@ function printSummary() {
   console.log('\n' + '='.repeat(60));
   console.log('SUMMARY');
   console.log('='.repeat(60));
-
-  if (dryRun) {
-    console.log('(DRY RUN - no changes made)\n');
-  }
-
+  if (dryRun) console.log('(DRY RUN - no changes made)\n');
   console.log(`Total documents checked: ${stats.total}`);
-
   console.log(`\nPromoted to Later (${stats.promoted.length}):`);
-  if (stats.promoted.length > 0) {
-    stats.promoted.forEach(t => console.log(`  - ${t}`));
-  } else {
-    console.log('  (none)');
-  }
-
+  stats.promoted.length ? stats.promoted.forEach(t => console.log(`  - ${t}`)) : console.log('  (none)');
   if (stats.archivedNoRead.length > 0) {
     console.log(`\nArchived - no READ marker (${stats.archivedNoRead.length}):`);
     stats.archivedNoRead.slice(0, 10).forEach(t => console.log(`  - ${t}`));
-    if (stats.archivedNoRead.length > 10) {
-      console.log(`  ... and ${stats.archivedNoRead.length - 10} more`);
-    }
+    if (stats.archivedNoRead.length > 10) console.log(`  ... and ${stats.archivedNoRead.length - 10} more`);
   }
-
   if (stats.archivedNoSummary.length > 0) {
     console.log(`\nArchived - no summary (${stats.archivedNoSummary.length}):`);
     stats.archivedNoSummary.slice(0, 10).forEach(t => console.log(`  - ${t}`));
-    if (stats.archivedNoSummary.length > 10) {
-      console.log(`  ... and ${stats.archivedNoSummary.length - 10} more`);
-    }
   }
-
   if (stats.skippedNoRead.length > 0) {
     console.log(`\nSkipped - has summary, no READ marker (${stats.skippedNoRead.length}):`);
     stats.skippedNoRead.forEach(t => console.log(`  - ${t}`));
   }
-
   if (stats.skippedNoSummary.length > 0) {
     console.log(`\nSkipped - no summary yet (${stats.skippedNoSummary.length}):`);
     stats.skippedNoSummary.forEach(t => console.log(`  - ${t}`));
   }
-
-  if (stats.skippedTooOld > 0) {
-    console.log(`\nSkipped - older than ${sinceDays} days: ${stats.skippedTooOld}`);
-  }
-
-  if (stats.skippedCached > 0) {
-    console.log(`\nSkipped - already processed (cached): ${stats.skippedCached}`);
-  }
-
-  if (stats.pruned && stats.pruned.length > 0) {
-    console.log(`\nPruned - stale (${stats.pruned.length}):`); 
+  if (stats.skippedTooOld > 0) console.log(`\nSkipped - older than ${sinceDays} days: ${stats.skippedTooOld}`);
+  if (stats.skippedCached > 0) console.log(`\nSkipped - cached: ${stats.skippedCached}`);
+  if (stats.pruned?.length > 0) {
+    console.log(`\nPruned - stale (${stats.pruned.length}):`);
     stats.pruned.slice(0, 10).forEach(t => console.log(`  - ${t}`));
     if (stats.pruned.length > 10) console.log(`  ... and ${stats.pruned.length - 10} more`);
   }
-
   console.log('\n' + '='.repeat(60));
 }
 
-// Prune stale articles from Feed and Later
 async function pruneStaleArticles(days) {
   console.log('='.repeat(60));
   console.log(`PRUNING STALE ARTICLES (not opened in ${days}+ days)`);
   console.log('='.repeat(60));
-  console.log('');
-
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
   log(`Cutoff date: ${cutoff.toISOString().split('T')[0]}`);
-
-  let pruned = [];
-  let skipped = [];
-
+  const pruned = [];
+  const skipped = [];
   for (const location of ['feed', 'later']) {
     const docs = await fetchDocuments(location);
-    log(`\nChecking ${docs.length} document(s) in ${location}...`);
-
+    log(`\nChecking ${docs.length} doc(s) in ${location}...`);
     for (const doc of docs) {
       const title = doc.title || doc.url || `ID: ${doc.id}`;
-
-      // Determine the last interaction date.
-      // last_opened_at is most accurate; fall back to created_at.
       const lastTouched = doc.last_opened_at || doc.created_at;
-      if (!lastTouched) {
-        log(`  Skipping (no date): ${title}`);
-        skipped.push(title);
-        continue;
-      }
-
+      if (!lastTouched) { skipped.push(title); continue; }
       const lastDate = new Date(lastTouched);
       const daysSince = Math.floor((Date.now() - lastDate) / (1000 * 60 * 60 * 24));
-
       if (lastDate < cutoff) {
-        log(`  Stale (${daysSince}d): ${title}`);
-        if (dryRun) {
-          log(`    [DRY RUN] Would archive`);
-        } else {
-          await delay(DELAY_MS);
-          await updateDocumentLocation(doc.id, 'archive');
-        }
+        if (!dryRun) { await delay(DELAY_MS); await updateDocumentLocation(doc.id, 'archive'); }
         pruned.push(`${title} (${daysSince}d, ${location})`);
-      } else {
-        log(`  Fresh (${daysSince}d): ${title}`);
       }
     }
   }
-
   console.log(`\n${dryRun ? '[DRY RUN] Would prune' : 'Pruned'}: ${pruned.length} stale article(s)`);
   if (skipped.length > 0) console.log(`Skipped (no date): ${skipped.length}`);
-
   return pruned;
 }
 
@@ -741,42 +714,32 @@ async function main() {
   console.log(`Mode: ${dryRun ? 'DRY RUN' : 'LIVE'}`);
   console.log(`Verbose: ${verbose ? 'ON' : 'OFF'}`);
   if (archiveSkipped) console.log('Archive skipped: ON');
-  if (limit) console.log(`Limit: ${limit} document(s)`);
+  if (limit) console.log(`Limit: ${limit}`);
   if (sinceDays) console.log(`Since: ${sinceDays} days`);
+  if (pruneStale) console.log(`Prune stale: ON (>${staleDays} days)`);
+  if (nukeLater) console.log(`Nuke Later: ON (>${nukeDays} days)`);
+  if (scoreShortlist) console.log(`Shortlist: ON (cap: ${SHORTLIST_CAP}, threshold: ${SHORTLIST_THRESHOLD})`);
   console.log('');
 
-  if (pruneStale) console.log(`Prune stale: ON (>${staleDays} days)`);
-  if (nukeLater) console.log(`Nuke Later: ON (archive everything >${nukeDays} days old)`);
-  if (scoreShortlist) console.log(`Shortlist: ON (threshold: ${SHORTLIST_THRESHOLD} pts)`);
-
   try {
-    // Shortlist FIRST so good articles are tagged before any nuking
     if (scoreShortlist) {
       await runShortlisting();
       console.log('');
     }
-
-    // Nuke AFTER shortlisting — shortlisted articles are protected inside nukeLaterArticles()
     if (nukeLater) {
       await nukeLaterArticles(nukeDays);
       console.log('');
     }
-
     if (pruneStale) {
       const pruned = await pruneStaleArticles(staleDays);
       stats.pruned = pruned;
       console.log('');
     }
-
     if (archiveLater) {
       await archiveAllLater();
       console.log('');
     }
-
-    if (!pruneStale || archiveLater || true) {
-      await processFeed();
-    }
-
+    await processFeed();
   } catch (error) {
     console.error('Error:', error.message);
     process.exit(1);
