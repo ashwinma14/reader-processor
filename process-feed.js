@@ -173,25 +173,17 @@ function scoreDoc(doc) {
   return { score, breakdown, shortlist: score >= SHORTLIST_THRESHOLD };
 }
 
-async function addTag(doc, tag) {
-  // Tags must be set via POST /save/ (upsert). Use ONLY source_url, never Reader internal URLs.
-  const url = doc.source_url;
-  if (!url) {
-    throw new Error('missing source_url');
-  }
-  await apiRequest('/save/', {
-    method: 'POST',
-    body: JSON.stringify({
-      url,
-      tags: [tag],
-      // DO NOT pass location — /save/ treats it as a move, which would restore archived articles to Later
-    }),
+async function moveToShortlist(docId) {
+  // Shortlist is a native Reader location — move via /update/ PATCH (same as moving to Later or Archive)
+  await apiRequest(`/update/${docId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify({ location: 'shortlist' }),
   });
 }
 
 async function runShortlisting() {
   console.log('='.repeat(60));
-  console.log('SHORTLIST SCORING (Later → tag: shortlist)');
+  console.log('SHORTLIST SCORING (Later → move to Shortlist)');
   console.log(`Threshold: ${SHORTLIST_THRESHOLD} pts`);
   console.log('='.repeat(60));
   console.log('');
@@ -215,12 +207,12 @@ async function runShortlisting() {
       if (!dryRun) {
         try {
           await delay(DELAY_MS);
-          await addTag(doc, 'shortlist');
+          await moveToShortlist(doc.id);
           tagged++;
         } catch (e) {
           failed++;
           failures.push(`${title} (${e.message})`);
-          log(`    tag failed: ${e.message}`);
+          log(`    move failed: ${e.message}`);
         }
       } else {
         tagged++;
