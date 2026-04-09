@@ -25,6 +25,154 @@ const nukeLater = args.includes('--nuke-later');
 const nukeDaysArg = args.find(a => a.startsWith('--nuke-days='));
 const nukeDays = nukeDaysArg ? parseInt(nukeDaysArg.split('=')[1], 10) : 30;
 const scoreShortlist = args.includes('--shortlist');
+const ingestNewsletters = args.includes('--ingest-newsletters');
+
+// ─── AgentMail config ────────────────────────────────────────────────────────
+const AGENTMAIL_API_KEY = process.env.AGENTMAIL_API_KEY || '';
+const AGENTMAIL_INBOX_ID = 'jungalowassistant@agentmail.to';
+const AGENTMAIL_API_BASE = 'https://api.agentmail.to/v0';
+
+// URL patterns to skip when extracting from newsletter HTML
+const SKIP_URL_PATTERNS = [
+  /unsubscribe/i, /manage.*subscription/i, /optout/i, /opt-out/i,
+  /click\?/i, /track\./i, /tracking\./i, /r\.substack\.com/i,
+  /mail\.beehiiv\.com/i, /open\.substack\.com/i,
+  /lists\./i, /email\./i, /campaign\./i,
+  /mailto:/i, /\.gif$/i, /\.png$/i, /\.jpg$/i,
+  /^https:\/\/(www\.)?google\.com/i,
+  /^https:\/\/(www\.)?facebook\.com/i,
+  /^https:\/\/(www\.)?twitter\.com/i,
+  /substack\.com\/(subscribe|account|login|profile|inbox)/i,
+  /longreads\.com\/(about|subscribe|donate|store|tag|category|page)/i,
+  /thebrowser\.com\/(about|subscribe|gift|account|login)/i,
+  /managingeditor\.substack\.com\/(about|subscribe|account)/i,
+];
+
+// Minimum URL quality checks
+function isArticleUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!['http:', 'https:'].includes(u.protocol)) return false;
+    if (SKIP_URL_PATTERNS.some(p => p.test(url))) return false;
+    // Must have a meaningful path (not just domain root)
+    if (u.pathname.length < 4) return false;
+    return true;
+  } catch { return false; }
+}
+
+function extractUrlsFromHtml(html) {
+  const urls = new Set();
+  const hrefRe = /href=["'](https?:\/\/[^"'\s>]+)["']/gi;
+  let m;
+  while ((m = hrefRe.exec(html)) !== null) {
+    const url = m[1].replace(/&amp;/g, '&');
+    if (isArticleUrl(url)) urls.add(url);
+  }
+  return [...urls];
+}
+
+async function agentMailRequest(path, options = {}) {
+  const url = `${AGENTMAIL_API_BASE}${path}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${AGENTMAIL_API_KEY}`,
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`AgentMail API error ${res.status}: ${txt}`);
+  }
+  return res.json();
+}
+
+async function saveUrlToReader(url, title = null) {
+  const body = { url, location: 'later' };
+  if (title) body.title = title;
+  try {
+    await apiRequest('/save/', { method: 'POST', body: JSON.stringify(body) });
+    return true;
+  } catch (err) {
+    log(`  Failed to save ${url}: ${err.message}`);
+    return false;
+  }
+}
+
+async function ingestNewsletterEmails() {
+  if (!AGENTMAIL_API_KEY) {
+    console.error('AGENTMAIL_API_KEY not set — skipping newsletter ingestion');
+    return;
+  }
+  console.log('='.repeat(60));
+  console.log('NEWSLETTER INGESTION (AgentMail → Reader Later)');
+  console.log('='.repeat(60));
+
+  // Fetch unread messages
+  let messages;
+  try {
+    const resp = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/messages?isRead=false&limit=50`);
+    messages = resp.messages || resp.items || resp || [];
+    if (!Array.isArray(messages)) messages = [];
+  } catch (err) {
+    console.error(`Failed to fetch AgentMail messages: ${err.message}`);
+    return;
+  }
+
+  console.log(`Found ${messages.length} unread message(s)`);
+  let totalSaved = 0;
+  let totalSkipped = 0;
+
+  for (const msg of messages) {
+    const subject = msg.subject || '(no subject)';
+    const msgId = msg.id || msg.messageId;
+    log(`\nProcessing: ${subject}`);
+
+    // Fetch full message to get HTML body
+    let fullMsg;
+    try {
+      fullMsg = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/messages/${msgId}`);
+    } catch (err) {
+      log(`  Could not fetch full message: ${err.message}`);
+      continue;
+    }
+
+    const html = fullMsg.html || fullMsg.body || '';
+    const urls = extractUrlsFromHtml(html);
+    log(`  Extracted ${urls.length} article URL(s)`);
+
+    for (const url of urls) {
+      if (dryRun) {
+        log(`  [DRY RUN] Would save: ${url}`);
+        totalSaved++;
+        continue;
+      }
+      await delay(DELAY_MS);
+      const saved = await saveUrlToReader(url);
+      if (saved) {
+        log(`  Saved: ${url}`);
+        totalSaved++;
+      } else {
+        totalSkipped++;
+      }
+    }
+
+    // Mark message as read
+    if (!dryRun && msgId) {
+      try {
+        await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/messages/${msgId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ isRead: true }),
+        });
+      } catch (err) {
+        log(`  Could not mark as read: ${err.message}`);
+      }
+    }
+  }
+
+  console.log(`\nNewsletter ingestion complete: ${totalSaved} saved, ${totalSkipped} skipped`);
+}
 
 // ─── Shortlist config ─────────────────────────────────────────────────────────
 
@@ -733,6 +881,10 @@ async function main() {
   console.log('');
 
   try {
+    if (ingestNewsletters) {
+      await ingestNewsletterEmails();
+      console.log('');
+    }
     if (scoreShortlist) {
       await runShortlisting();
       console.log('');
@@ -751,7 +903,7 @@ async function main() {
       console.log('');
     }
     // Only run feed processing if explicitly needed — don't run unconditionally
-    if (!scoreShortlist && !pruneStale && !nukeLater && !archiveLater) {
+    if (!scoreShortlist && !pruneStale && !nukeLater && !archiveLater && !ingestNewsletters) {
       await processFeed();
     } else if (archiveLater) {
       // already handled above
