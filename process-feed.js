@@ -24,6 +24,160 @@ const staleDays = staleDaysArg ? parseInt(staleDaysArg.split('=')[1], 10) : 30;
 const nukeLater = args.includes('--nuke-later');
 const nukeDaysArg = args.find(a => a.startsWith('--nuke-days='));
 const nukeDays = nukeDaysArg ? parseInt(nukeDaysArg.split('=')[1], 10) : 30;
+const scoreShortlist = args.includes('--shortlist');
+
+// ─── Shortlist scoring ────────────────────────────────────────────────────────
+
+const SHORTLIST_THRESHOLD = 50;
+
+// Trusted domains get a boost. Everything else is neutral.
+const TRUSTED_DOMAINS = [
+  // Quality tech / product
+  'stratechery.com', 'paulgraham.com', 'waitbutwhy.com', 'every.to',
+  'ben-evans.com', 'lenny.substack.com', 'lennysnewsletter.com', 'morningbrew.com',
+  'hbr.org', 'firstround.com', 'a16z.com', 'sequoiacap.com',
+  // General quality
+  'nytimes.com', 'theatlantic.com', 'newyorker.com', 'noahpinion.substack.com',
+  'bloomberg.com', 'wsj.com', 'economist.com', 'ft.com',
+  // Tech news
+  'techcrunch.com', 'theverge.com', 'wired.com', 'arstechnica.com',
+  'simonwillison.net', 'macstories.net', 'daring fireball.net',
+];
+
+const SPAM_TITLE_SIGNALS = [
+  'digest', 'weekly', 'vol.', 'issue', 'roundup',
+  'links i loved', "what i'm reading", 'newsletter', 'edition',
+  'this week in', 'weekend reads', 'morning links',
+];
+
+function scoreDoc(doc) {
+  let score = 0;
+  const breakdown = [];
+  const title = (doc.title || '').toLowerCase();
+  const category = (doc.category || 'article').toLowerCase();
+  const summary = doc.summary || '';
+  const url = doc.url || '';
+  const readingProgress = doc.reading_progress || 0; // 0.0 to 1.0
+  const wordCount = doc.word_count || 0;
+  const savedAt = doc.saved_at || doc.created_at;
+
+  // --- Category (0-30 pts) ---
+  let catScore = 0;
+  if (category === 'article') {
+    catScore = 30;
+  } else if (category === 'pdf') {
+    catScore = 20;
+  } else if (category === 'tweet') {
+    // Thread detection: thread emoji OR substantial word count
+    const isThread = title.includes('\uD83E\uDDF5') || title.includes('thread') || wordCount > 200;
+    catScore = isThread ? 20 : 5;
+  } else if (category === 'email') {
+    catScore = 5;
+  } else {
+    catScore = 10; // video, podcast, etc.
+  }
+  score += catScore;
+  breakdown.push(`category(${category}): +${catScore}`);
+
+  // --- Summary quality (0-15 pts) ---
+  const summaryScore = summary.length > 100 ? 15 : 0;
+  score += summaryScore;
+  if (summaryScore) breakdown.push(`summary: +${summaryScore}`);
+
+  // --- Recency (0-20 pts) ---
+  let recencyScore = 0;
+  if (savedAt) {
+    const daysSaved = Math.floor((Date.now() - new Date(savedAt)) / (1000 * 60 * 60 * 24));
+    if (daysSaved <= 7) recencyScore = 20;
+    else if (daysSaved <= 14) recencyScore = 15;
+    else if (daysSaved <= 30) recencyScore = 10;
+    else if (daysSaved <= 60) recencyScore = 5;
+    score += recencyScore;
+    breakdown.push(`recency(${daysSaved}d): +${recencyScore}`);
+  }
+
+  // --- Reading progress (0-15 pts) ---
+  let progressScore = 0;
+  const pct = readingProgress * 100;
+  if (pct > 0 && pct < 90) {
+    progressScore = 15; // started but unfinished
+  } else if (pct === 0) {
+    progressScore = 5;
+  }
+  // finished (>=90%) gets 0 — already done
+  score += progressScore;
+  breakdown.push(`progress(${Math.round(pct)}%): +${progressScore}`);
+
+  // --- Spam title penalty (-30 pts) ---
+  const isSpam = SPAM_TITLE_SIGNALS.some(s => title.includes(s));
+  if (isSpam) {
+    score -= 30;
+    breakdown.push('spam_title: -30');
+  }
+
+  // --- Domain boost (+15 pts) ---
+  let domainScore = 0;
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    if (TRUSTED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d))) {
+      domainScore = 15;
+      score += domainScore;
+      breakdown.push(`trusted_domain(${hostname}): +${domainScore}`);
+    }
+  } catch (_) {}
+
+  return { score, breakdown, shortlist: score >= SHORTLIST_THRESHOLD };
+}
+
+async function addTag(docId, tag) {
+  await apiRequest(`/update/${docId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify({ tags: [tag] }),
+  });
+}
+
+async function runShortlisting() {
+  console.log('='.repeat(60));
+  console.log('SHORTLIST SCORING (Later → tag: shortlist)');
+  console.log(`Threshold: ${SHORTLIST_THRESHOLD} pts`);
+  console.log('='.repeat(60));
+  console.log('');
+
+  const docs = await fetchDocuments('later');
+  console.log(`Scoring ${docs.length} document(s) in Later...\n`);
+
+  let tagged = 0;
+  let skipped = 0;
+  const topArticles = [];
+
+  for (const doc of docs) {
+    const title = doc.title || doc.url || `ID: ${doc.id}`;
+    const { score, breakdown, shortlist } = scoreDoc(doc);
+
+    if (shortlist) {
+      log(`  [${score}] SHORTLIST: ${title}`);
+      log(`    ${breakdown.join(' | ')}`);
+      if (!dryRun) {
+        await delay(DELAY_MS);
+        await addTag(doc.id, 'shortlist');
+      }
+      tagged++;
+      topArticles.push({ score, title });
+    } else {
+      log(`  [${score}] skip: ${title}`);
+      skipped++;
+    }
+  }
+
+  // Print top 10 by score regardless of verbose
+  topArticles.sort((a, b) => b.score - a.score);
+  console.log(`\nTop shortlisted articles:`);
+  topArticles.slice(0, 10).forEach(a => console.log(`  [${a.score}] ${a.title}`));
+
+  console.log('\n' + '='.repeat(60));
+  console.log(`${dryRun ? '[DRY RUN] Would tag' : 'Tagged'}: ${tagged} | Skipped: ${skipped}`);
+  console.log('='.repeat(60));
+}
 const limitArg = args.find(a => a.startsWith('--limit='));
 const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null;
 const sinceArg = args.find(a => a.startsWith('--since='));
@@ -477,8 +631,14 @@ async function main() {
 
   if (pruneStale) console.log(`Prune stale: ON (>${staleDays} days)`);
   if (nukeLater) console.log(`Nuke Later: ON (archive everything >${nukeDays} days old)`);
+  if (scoreShortlist) console.log(`Shortlist: ON (threshold: ${SHORTLIST_THRESHOLD} pts)`);
 
   try {
+    if (scoreShortlist) {
+      await runShortlisting();
+      console.log('');
+    }
+
     if (nukeLater) {
       await nukeLaterArticles(nukeDays);
       console.log('');
