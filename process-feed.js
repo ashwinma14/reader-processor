@@ -306,10 +306,21 @@ async function runShortlisting() {
     return { doc, score, effectiveScore, breakdown, inShortlist: true, decayApplied };
   });
 
-  // 2. Fetch Later docs
-  console.log('\nFetching Later...');
-  const laterDocs = await fetchDocuments('later');
-  console.log(`  ${laterDocs.length} items in Later`);
+  // 2. Fetch Later docs — only items saved/updated since last run
+  const lastRun = cache.lastShortlistRun ? new Date(cache.lastShortlistRun) : null;
+  const sinceLabel = lastRun ? lastRun.toISOString().split('T')[0] : 'all time';
+  console.log(`\nFetching Later (changed since ${sinceLabel})...`);
+  const allLaterDocs = await fetchDocuments('later');
+  // Filter to items that are new or updated since last run
+  const laterDocs = lastRun
+    ? allLaterDocs.filter(doc => {
+        const ts = doc.updated_at || doc.saved_at || doc.created_at;
+        return ts && new Date(ts) > lastRun;
+      })
+    : allLaterDocs;
+  console.log(`  ${laterDocs.length} new/updated items in Later (${allLaterDocs.length} total)`);
+  // Save timestamp for next run
+  if (!dryRun) { cache.lastShortlistRun = new Date().toISOString(); saveCache(cache); }
 
   // 3. Filter library candidates and score the rest
   const libraryCandidates = [];
