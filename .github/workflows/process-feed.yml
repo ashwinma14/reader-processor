@@ -30,6 +30,11 @@ on:
         required: false
         default: "30"
         type: string
+      shortlist:
+        description: "Score Later articles and tag top ones as 'shortlist'"
+        required: false
+        default: "false"
+        type: boolean
 
 jobs:
   process:
@@ -62,6 +67,7 @@ jobs:
             [ "${{ inputs.verbose }}" = "true" ] && ARGS="$ARGS --verbose"
             [ "${{ inputs.prune_stale }}" = "true" ] && ARGS="$ARGS --prune-stale --stale-days=${{ inputs.stale_days }}"
             [ "${{ inputs.nuke_later }}" = "true" ] && ARGS="$ARGS --nuke-later --nuke-days=${{ inputs.nuke_days }}"
+            [ "${{ inputs.shortlist }}" = "true" ] && ARGS="$ARGS --shortlist"
           else
             ARGS="--prune-stale --stale-days=30"
           fi
