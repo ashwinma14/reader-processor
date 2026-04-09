@@ -69,7 +69,7 @@ jobs:
             [ "${{ inputs.nuke_later }}" = "true" ] && ARGS="$ARGS --nuke-later --nuke-days=${{ inputs.nuke_days }}"
             [ "${{ inputs.shortlist }}" = "true" ] && ARGS="$ARGS --shortlist"
           else
-            ARGS="--prune-stale --stale-days=30"
+            ARGS="--shortlist --prune-stale --stale-days=30"
           fi
           node process-feed.js $ARGS
         env:
