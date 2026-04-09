@@ -173,10 +173,53 @@ function scoreDoc(doc) {
   return { score, breakdown, shortlist: score >= SHORTLIST_THRESHOLD };
 }
 
+function humanizeShortlistReason(score, breakdown) {
+  const reasons = [];
+
+  const category = breakdown.find((b) => b.startsWith('category('));
+  if (category?.includes('article')) reasons.push('it\'s a full article');
+  else if (category?.includes('email')) reasons.push('it looks like a high-signal newsletter');
+  else if (category?.includes('tweet')) reasons.push('it looks like a worthwhile thread or tweet');
+  else if (category?.includes('video')) reasons.push('it looks like a video worth watching');
+  else if (category?.includes('pdf')) reasons.push('it looks like a solid PDF/doc');
+
+  const recency = breakdown.find((b) => b.startsWith('recency('));
+  if (recency) {
+    const m = recency.match(/recency\((\d+)d\)/);
+    if (m) {
+      const days = Number(m[1]);
+      if (days <= 3) reasons.push('it\'s very recent');
+      else if (days <= 7) reasons.push('it\'s still fresh');
+      else reasons.push('it still seems worth surfacing');
+    }
+  }
+
+  if (breakdown.some((b) => b.startsWith('trusted_domain('))) {
+    reasons.push('it came from a source you probably want to pay attention to');
+  }
+
+  if (breakdown.some((b) => b.startsWith('summary_base'))) {
+    reasons.push('the summary suggests there\'s real substance here');
+  }
+
+  if (breakdown.some((b) => b.includes('summary_has_quote'))) {
+    reasons.push('it had at least one concrete idea worth pulling forward');
+  }
+
+  if (breakdown.some((b) => b.startsWith('progress(') && !b.includes('100%'))) {
+    reasons.push('you haven\'t really gotten through it yet');
+  }
+
+  const cleanReasons = [...new Set(reasons)].slice(0, 3);
+  const why = cleanReasons.length ? cleanReasons.join(', ') : 'it scored well across freshness, substance, and source quality';
+
+  return `Why this made Shortlist: ${why}. Score: ${score}.`;
+}
+
 async function moveToShortlist(docId, score, breakdown) {
   // Shortlist is a native Reader location — move via /update/ PATCH
-  // Also write a brief scoring note so you know why it landed here
-  const note = `🎯 Shortlisted [${score}pts]: ${breakdown.join(' | ')}`;
+  // Also write a brief human-readable note so you know why it landed here
+  const note = humanizeShortlistReason(score, breakdown);
   await apiRequest(`/update/${docId}/`, {
     method: 'PATCH',
     body: JSON.stringify({
