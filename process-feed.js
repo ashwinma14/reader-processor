@@ -37,7 +37,7 @@ const REDIRECT_PARAM_KEYS = [
   'redirect_uri', 'href', 'r', 'to'
 ];
 
-const TRACKING_QUERY_PREFIXES = ['utm_', 'mc_', 'fbclid', 'gclid', 'ref', 'ref_src', 'ref_url', 'source'];
+const TRACKING_QUERY_PREFIXES = ['utm_', 'mc_', 'fbclid', 'gclid', 'ref', 'ref_src', 'ref_url', 'source', 'attribution_', 'campaign', 'cid'];
 
 // Hard junk-link suppression
 const SKIP_URL_PATTERNS = [
@@ -197,8 +197,10 @@ function isLikelyNewsletterContent(anchor) {
 
 function isGenericArticleCandidate(urlObj, anchor = {}) {
   const url = urlObj.toString();
+  const host = urlObj.hostname.replace(/^www\./, '');
   if (!['http:', 'https:'].includes(urlObj.protocol)) return false;
   if (SKIP_URL_PATTERNS.some(p => p.test(url))) return false;
+  if (host === 'thebrowser.com' || host.endsWith('.thebrowser.com') || host === 'browsermedia.news') return false;
   if (urlObj.pathname.length < 4) return false;
   if (!isLikelyNewsletterContent(anchor)) return false;
   return true;
