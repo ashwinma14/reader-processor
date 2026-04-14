@@ -444,6 +444,23 @@ function getDomain(doc) {
   }
 }
 
+function isNewsletterWrapperDoc(doc) {
+  try {
+    const u = new URL(doc.url || '');
+    const host = u.hostname.replace(/^www\./, '');
+    const path = u.pathname || '/';
+
+    if (host === 'thebrowser.com' || host === 'browsermedia.news') return true;
+    if (host === 'nextdraft.com') return true;
+    if (host === 'managingeditor.substack.com') return true;
+    if (host === 'longreads.com' && /^\/newsletters\//i.test(path)) return true;
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ─── Scoring ─────────────────────────────────────────────────────────────────
 
 function scoreDoc(doc) {
@@ -536,6 +553,12 @@ function scoreDoc(doc) {
     breakdown.push('spam_title: -30');
   }
 
+  // --- Newsletter wrapper penalty (hard block) ---
+  if (isNewsletterWrapperDoc(doc)) {
+    score -= 100;
+    breakdown.push('newsletter_wrapper: -100');
+  }
+
   // --- Domain boost (+15 pts) ---
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, '');
@@ -579,6 +602,10 @@ function humanizeShortlistReason(score, breakdown, decayApplied) {
     reasons.push('the angle seems worth thinking about');
   } else if (breakdown.some((b) => b.startsWith('summary_base'))) {
     reasons.push('the summary suggests there\'s real substance here');
+  }
+
+  if (breakdown.some((b) => b.includes('newsletter_wrapper'))) {
+    reasons.push('it is probably a newsletter wrapper, not the real article');
   }
 
   const cleanReasons = [...new Set(reasons)].slice(0, 3);
@@ -668,6 +695,10 @@ async function runShortlisting() {
   const laterCandidates = [];
 
   for (const doc of laterDocs) {
+    if (isNewsletterWrapperDoc(doc)) {
+      log(`  [WRAPPER skip] ${doc.title || doc.url}`);
+      continue;
+    }
     if (isLibraryContent(doc)) {
       libraryCandidates.push(doc);
       continue;
