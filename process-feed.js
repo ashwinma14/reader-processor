@@ -32,18 +32,32 @@ const AGENTMAIL_API_KEY = process.env.AGENTMAIL_API_KEY || '';
 const AGENTMAIL_INBOX_ID = 'jungalowassistant@agentmail.to';
 const AGENTMAIL_API_BASE = 'https://api.agentmail.to/v0';
 
-// URL patterns to skip when extracting from newsletter HTML
+const REDIRECT_PARAM_KEYS = [
+  'url', 'u', 'target', 'dest', 'destination', 'redirect', 'redirect_url',
+  'redirect_uri', 'href', 'r', 'to'
+];
+
+const TRACKING_QUERY_PREFIXES = ['utm_', 'mc_', 'fbclid', 'gclid', 'ref', 'ref_src', 'ref_url', 'source'];
+
+// Hard junk-link suppression
 const SKIP_URL_PATTERNS = [
-  /unsubscribe/i, /manage.*subscription/i, /optout/i, /opt-out/i,
-  /\/track\//i, /tracking\./i,
-  /mail\.beehiiv\.com/i,
+  /unsubscribe/i, /manage.*subscription/i, /manage-preferences/i, /optout/i, /opt-out/i,
+  /welcome/i, /confirm/i, /confirmation/i, /forward/i, /share/i,
+  /\/track\//i, /tracking\./i, /trk=/i,
+  /mail\.beehiiv\.com/i, /link\.mail\.beehiiv\.com/i,
   /lists\./i, /campaign\./i,
-  /mailto:/i, /\.gif$/i, /\.png$/i, /\.jpg$/i,
-  /^https:\/\/(www\.)?google\.com/i,
+  /mailto:/i, /\.gif($|\?)/i, /\.png($|\?)/i, /\.jpe?g($|\?)/i, /\.webp($|\?)/i,
+  /^https:\/\/(www\.)?google\.com\/amp\//i,
+  /^https:\/\/(www\.)?google\.com\/url/i,
   /^https:\/\/(www\.)?facebook\.com/i,
-  /^https:\/\/(www\.)?twitter\.com/i,
-  // Substack infra — skip everything except actual article pages
-  /substack\.com\/(subscribe|account|login|profile|inbox|app|app-link|redirect|@)/i,
+  /^https:\/\/(www\.)?(twitter|x)\.com/i,
+  /^https:\/\/(www\.)?instagram\.com/i,
+  /^https:\/\/(www\.)?linkedin\.com/i,
+  /^https:\/\/(www\.)?youtube\.com/i,
+  /^https:\/\/(www\.)?tiktok\.com/i,
+  // Substack infra — skip everything except real post pages
+  /substack\.com\/(subscribe|account|login|profile|inbox|app|app-link|redirect|podcast|people|publish|archive|home)(\/|$)/i,
+  /substack\.com\/@/i,
   /substackcdn\.com/i,
   /substack\.com\/redirect/i,
   // Mailchimp infra
@@ -52,36 +66,200 @@ const SKIP_URL_PATTERNS = [
   /mailchimp\.com/i,
   /mcsv\.net/i,
   // Newsletter nav/promo links
-  /longreads\.com\/(about|subscribe|donate|store|tag|category|page)/i,
-  /thebrowser\.com\/(about|subscribe|gift|account|login)/i,
-  /managingeditor\.substack\.com\/(about|subscribe|account)/i,
+  /thebrowser\.com\/(about|subscribe|gift|account|login|archive|archives)(\/|$)/i,
+  /nextdraft\.com\/(about|why|scream|archives\/page)(\/|$)/i,
+  /longreads\.com\/(about|subscribe|donate|store|tag|category|page|newsletter)(\/|$)/i,
+  /managingeditor\.substack\.com\/(about|subscribe|account)(\/|$)/i,
   // Tracking pixels and redirectors
   /\/open\?token=/i,
   /click\.ghost\./i,
   /ghost\.io\/r\//i,
 ];
 
-// Minimum URL quality checks
-function isArticleUrl(url) {
-  try {
-    const u = new URL(url);
-    if (!['http:', 'https:'].includes(u.protocol)) return false;
-    if (SKIP_URL_PATTERNS.some(p => p.test(url))) return false;
-    // Must have a meaningful path (not just domain root)
-    if (u.pathname.length < 4) return false;
-    return true;
-  } catch { return false; }
+const JUNK_ANCHOR_TEXT_PATTERNS = [
+  /^view in browser$/i, /^read online$/i, /^website$/i, /^share$/i, /^forward$/i,
+  /^tweet$/i, /^post$/i, /^subscribe$/i, /^donate$/i, /^gift$/i, /^account$/i,
+  /^manage preferences$/i, /^unsubscribe$/i, /^archives?$/i, /^about$/i, /^login$/i,
+  /^read more$/i, /^more$/i, /^here$/i, /^link$/i
+];
+
+const NEWSLETTER_PROFILES = {
+  browser: {
+    match: /the browser|thebrowser\.com|browsermedia/i,
+    allow(urlObj, anchor) {
+      const host = urlObj.hostname.replace(/^www\./, '');
+      if (host.endsWith('thebrowser.com') || host.endsWith('browsermedia.news')) return false;
+      return isGenericArticleCandidate(urlObj, anchor);
+    },
+  },
+  longreads: {
+    match: /longreads/i,
+    allow(urlObj, anchor) {
+      const host = urlObj.hostname.replace(/^www\./, '');
+      if (host.endsWith('longreads.com')) {
+        return (
+          /^\/(newsletters|picks|features|reading-lists|best-of)\/[^/]+\/?$/i.test(urlObj.pathname) ||
+          /^\/\d{4}\/\d{2}\/\d{2}\/.+/i.test(urlObj.pathname)
+        );
+      }
+      return isGenericArticleCandidate(urlObj, anchor);
+    },
+  },
+  nextdraft: {
+    match: /nextdraft|managingeditor\.substack\.com|dave pell|managing editor/i,
+    allow(urlObj, anchor) {
+      const host = urlObj.hostname.replace(/^www\./, '');
+      if (host === 'nextdraft.com') {
+        return /^\/archives\/n\d{8}\/[^/]+\/?$/i.test(urlObj.pathname);
+      }
+      if (host === 'managingeditor.substack.com') return false;
+      return isGenericArticleCandidate(urlObj, anchor);
+    },
+  },
+};
+
+function decodeHtmlEntities(str = '') {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&#038;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
 }
 
-function extractUrlsFromHtml(html) {
-  const urls = new Set();
-  const hrefRe = /href=["'](https?:\/\/[^"'\s>]+)["']/gi;
-  let m;
-  while ((m = hrefRe.exec(html)) !== null) {
-    const url = m[1].replace(/&amp;/g, '&');
-    if (isArticleUrl(url)) urls.add(url);
+function stripTags(str = '') {
+  return decodeHtmlEntities(str).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeNewsletterUrl(rawUrl) {
+  let candidate = decodeHtmlEntities((rawUrl || '').trim());
+  if (!candidate) return null;
+
+  for (let i = 0; i < 4; i++) {
+    let urlObj;
+    try {
+      urlObj = new URL(candidate);
+    } catch {
+      return null;
+    }
+
+    const redirectValue = REDIRECT_PARAM_KEYS
+      .map(key => urlObj.searchParams.get(key))
+      .find(Boolean);
+
+    if (redirectValue && /^https?:\/\//i.test(decodeURIComponent(redirectValue))) {
+      candidate = decodeURIComponent(redirectValue);
+      continue;
+    }
+
+    if (urlObj.hostname === 'www.google.com' && urlObj.pathname === '/url') {
+      const q = urlObj.searchParams.get('q');
+      if (q && /^https?:\/\//i.test(q)) {
+        candidate = q;
+        continue;
+      }
+    }
+
+    for (const key of [...urlObj.searchParams.keys()]) {
+      if (TRACKING_QUERY_PREFIXES.some(prefix => key.toLowerCase().startsWith(prefix))) {
+        urlObj.searchParams.delete(key);
+      }
+    }
+
+    urlObj.hash = '';
+    const normalized = urlObj.toString().replace(/\/$/, urlObj.pathname === '/' ? '/' : '');
+    return normalized;
   }
-  return [...urls];
+
+  return null;
+}
+
+function extractAnchorsFromHtml(html) {
+  const anchors = [];
+  const anchorRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gis;
+  let match;
+  while ((match = anchorRe.exec(html)) !== null) {
+    anchors.push({
+      rawUrl: match[1],
+      text: stripTags(match[2]),
+    });
+  }
+  return anchors;
+}
+
+function isLikelyNewsletterContent(anchor) {
+  const text = (anchor.text || '').trim();
+  if (JUNK_ANCHOR_TEXT_PATTERNS.some(p => p.test(text))) return false;
+  if (text && text.length < 5) return false;
+  return true;
+}
+
+function isGenericArticleCandidate(urlObj, anchor = {}) {
+  const url = urlObj.toString();
+  if (!['http:', 'https:'].includes(urlObj.protocol)) return false;
+  if (SKIP_URL_PATTERNS.some(p => p.test(url))) return false;
+  if (urlObj.pathname.length < 4) return false;
+  if (!isLikelyNewsletterContent(anchor)) return false;
+  return true;
+}
+
+function detectNewsletterSender(thread, fullThread) {
+  const messages = fullThread?.messages || [];
+  const haystack = [
+    thread?.subject,
+    thread?.from,
+    thread?.from_name,
+    thread?.from_email,
+    ...(messages.flatMap(m => [m.from, m.from_name, m.from_email, m.sender, m.sender_email, m.subject])),
+  ]
+    .filter(Boolean)
+    .join(' | ')
+    .toLowerCase();
+
+  for (const [key, profile] of Object.entries(NEWSLETTER_PROFILES)) {
+    if (profile.match.test(haystack)) return key;
+  }
+  return 'generic';
+}
+
+function extractNewsletterLinks(thread, fullThread) {
+  const senderKey = detectNewsletterSender(thread, fullThread);
+  const profile = NEWSLETTER_PROFILES[senderKey];
+  const messages = fullThread?.messages || [];
+  const html = messages.map(m => m.html || m.body || '').join('\n');
+  const anchors = extractAnchorsFromHtml(html);
+  const results = [];
+  const seen = new Set();
+
+  for (const anchor of anchors) {
+    const normalized = normalizeNewsletterUrl(anchor.rawUrl);
+    if (!normalized || seen.has(normalized)) continue;
+
+    let urlObj;
+    try {
+      urlObj = new URL(normalized);
+    } catch {
+      continue;
+    }
+
+    const allowed = profile
+      ? profile.allow(urlObj, anchor)
+      : isGenericArticleCandidate(urlObj, anchor);
+
+    if (!allowed) continue;
+
+    seen.add(normalized);
+    results.push({ url: normalized, title: anchor.text || null, senderKey });
+  }
+
+  return results;
+}
+
+async function fetchAgentMailThreads() {
+  const resp = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/threads?labels=unread&limit=50`);
+  const threads = resp.threads || resp.items || resp || [];
+  return Array.isArray(threads) ? threads : [];
 }
 
 async function agentMailRequest(path, options = {}) {
@@ -125,9 +303,7 @@ async function ingestNewsletterEmails() {
   // Fetch unread threads (threads contain full message bodies)
   let threads;
   try {
-    const resp = await agentMailRequest(`/inboxes/${AGENTMAIL_INBOX_ID}/threads?labels=unread&limit=50`);
-    threads = resp.threads || resp.items || resp || [];
-    if (!Array.isArray(threads)) threads = [];
+    threads = await fetchAgentMailThreads();
   } catch (err) {
     console.error(`Failed to fetch AgentMail threads: ${err.message}`);
     return;
@@ -151,22 +327,22 @@ async function ingestNewsletterEmails() {
       continue;
     }
 
-    // Thread messages are nested inside the thread object
     const threadMessages = fullThread.messages || [];
-    const allHtml = threadMessages.map(m => m.html || m.body || '').join('\n');
-    const urls = extractUrlsFromHtml(allHtml);
-    log(`  Extracted ${urls.length} article URL(s) from ${threadMessages.length} message(s)`);
+    const links = extractNewsletterLinks(thread, fullThread);
+    const senderKey = links[0]?.senderKey || detectNewsletterSender(thread, fullThread);
+    log(`  Sender: ${senderKey}`);
+    log(`  Extracted ${links.length} article URL(s) from ${threadMessages.length} message(s)`);
 
-    for (const url of urls) {
+    for (const link of links) {
       if (dryRun) {
-        log(`  [DRY RUN] Would save: ${url}`);
+        log(`  [DRY RUN] Would save: ${link.url}`);
         totalSaved++;
         continue;
       }
       await delay(DELAY_MS);
-      const saved = await saveUrlToReader(url);
+      const saved = await saveUrlToReader(link.url, link.title);
       if (saved) {
-        log(`  Saved: ${url}`);
+        log(`  Saved: ${link.url}`);
         totalSaved++;
       } else {
         totalSkipped++;
