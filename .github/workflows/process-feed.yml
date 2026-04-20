@@ -75,7 +75,7 @@ jobs:
             [ "${{ inputs.shortlist }}" = "true" ] && ARGS="$ARGS --shortlist"
             [ "${{ inputs.ingest_newsletters }}" = "true" ] && ARGS="$ARGS --ingest-newsletters"
           else
-            ARGS="--ingest-newsletters --shortlist --prune-stale --stale-days=30"
+            ARGS="--shortlist --prune-stale --stale-days=30"
           fi
           node process-feed.js $ARGS
         env:
